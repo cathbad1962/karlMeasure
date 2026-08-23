@@ -142,7 +142,8 @@ identical across display scaling factors.
 Each line is the definition of done for that session.
 
 1. A PDF opens and a page is visible in a window.
-2. The page pans and zooms smoothly; page navigation works.
+2. The page pans and zooms smoothly; page navigation works. The scroll wheel
+   zooms about the cursor; holding the wheel button down and dragging pans.
 3. Pick two points, enter a known distance and unit, see a scale readout that
    survives zooming.
 4. Click three times to place corner anchors, close the path, see the enclosed
