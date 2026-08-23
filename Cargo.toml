@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+eframe = "0.36"
+pdfium-render = { version = "0.9", default-features = false, features = [
+    "pdfium_latest",
+    "thread_safe",
+] }
+rfd = "0.17"

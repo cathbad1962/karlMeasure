@@ -71,9 +71,12 @@ anticipate one.
 - **Render the visible viewport only**, never the full page — a full-size sheet
   at working DPI exceeds practical texture limits. Re-render on a debounced
   pan/zoom settle; scale the stale texture in the interim.
-- **PDFium is a native library.** `pdfium-render` loads it at runtime rather
-  than vendoring it. How it is supplied is not yet decided — settle this in
-  slice 1 and record the answer here.
+- **PDFium is a native library, loaded dynamically.** `pdfium-render` does not
+  vendor it. The binding looks for the platform library next to the executable
+  first, then falls back to a system-wide install. The crate is used with
+  `default-features = false` so it pulls in no image-decoding dependency;
+  bitmaps arrive as raw BGRA and are swapped to RGBA at upload. Revisit static
+  linking at slice 10 if a single-file binary is wanted.
 - **Areas are computed analytically** via `kurbo`'s signed area. Do not flatten
   curves to compute area; flattening is for rendering and hit-testing only.
 - **Holes are subpaths with opposite winding.** Signed areas sum. No
@@ -157,5 +160,5 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: 1 — not started.** `src/main.rs` is still the `cargo new`
-stub and `[dependencies]` is empty. Update this line when a slice is accepted.
+**Current slice: 2 — not started.** Slice 1 is accepted: `Open…` renders page 1
+fitted to the window. Update this line when a slice is accepted.
