@@ -1,0 +1,5 @@
+/target
+
+# Real drawings carry identifying title blocks — never commit them.
+*.pdf
+samples/
