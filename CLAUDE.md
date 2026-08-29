@@ -75,8 +75,9 @@ anticipate one.
   vendor it. The binding looks for the platform library next to the executable
   first, then falls back to a system-wide install. The crate is used with
   `default-features = false` so it pulls in no image-decoding dependency;
-  bitmaps arrive as raw BGRA and are swapped to RGBA at upload. Revisit static
-  linking at slice 10 if a single-file binary is wanted.
+  bitmaps are normalised to RGBA by the binding, which needs no image feature.
+  Do not swap channels by hand — the binding already reverses its own byte
+  order. Revisit static linking at slice 10 if a single-file binary is wanted.
 - **Areas are computed analytically** via `kurbo`'s signed area. Do not flatten
   curves to compute area; flattening is for rendering and hit-testing only.
 - **Holes are subpaths with opposite winding.** Signed areas sum. No
