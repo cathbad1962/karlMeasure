@@ -1,6 +1,8 @@
-//! What the user builds on top of a drawing. For now, the scale of a page.
+//! What the user builds on top of a drawing: the scale of a page, and the
+//! areas measured on it.
 
-use kurbo::Point;
+use eframe::egui::Color32;
+use kurbo::{Point, Vec2};
 
 /// Millimetres in one PDF point: 72 points to the inch, 25.4 mm to the inch.
 const MM_PER_POINT: f64 = 25.4 / 72.0;
@@ -24,6 +26,12 @@ impl Unit {
         Self::Inches,
         Self::Feet,
     ];
+
+    /// Metric units read naturally in square metres, imperial ones in square
+    /// feet, which is the only thing this distinction is for.
+    pub fn is_metric(self) -> bool {
+        matches!(self, Self::Millimetres | Self::Centimetres | Self::Metres)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -84,6 +92,69 @@ impl Calibration {
     pub fn ratio(&self) -> f64 {
         self.units_per_point() * self.unit.millimetres() / MM_PER_POINT
     }
+
+    /// The real area, in square millimetres, of `area` square page points.
+    /// Square millimetres because every unit converts to them exactly; how the
+    /// number is then read out is a question for whoever displays it.
+    pub fn square_millimetres(&self, area: f64) -> f64 {
+        area * (self.units_per_point() * self.unit.millimetres()).powi(2)
+    }
+}
+
+// The data model below is fixed in full. Slice 4 only places corners into it
+// and only reads the outline back, so the parts that curves, holes, naming and
+// visibility will use are not read yet.
+
+/// How an anchor's two handles relate to each other.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorKind {
+    Corner,
+    Smooth,
+    Asymmetric,
+}
+
+/// A point on a path, with the handles that shape the curve either side of it.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub struct Anchor {
+    /// Page space.
+    pub pos: Point,
+    /// Relative to `pos`.
+    pub in_handle: Vec2,
+    /// Relative to `pos`.
+    pub out_handle: Vec2,
+    pub kind: AnchorKind,
+}
+
+impl Anchor {
+    /// A corner: both handles collapsed onto the point, which leaves the
+    /// edges either side straight.
+    pub fn corner(pos: Point) -> Self {
+        Self {
+            pos,
+            in_handle: Vec2::ZERO,
+            out_handle: Vec2::ZERO,
+            kind: AnchorKind::Corner,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SubPath {
+    pub anchors: Vec<Anchor>,
+    pub closed: bool,
+}
+
+/// A named area on a page: an outline, and later the holes punched in it.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct Measurement {
+    pub name: String,
+    pub outer: SubPath,
+    pub holes: Vec<SubPath>,
+    pub colour: Color32,
+    pub visible: bool,
 }
 
 #[cfg(test)]

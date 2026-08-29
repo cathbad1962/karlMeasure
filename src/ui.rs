@@ -6,8 +6,10 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use kurbo::{Point, Rect, Size, Vec2};
 
-use crate::doc::{Calibration, Unit};
+use crate::doc::{Calibration, Measurement, SubPath, Unit};
+use crate::geom;
 use crate::pdf;
+use crate::tools::Pen;
 use crate::viewport::Viewport;
 
 /// A pan, zoom or resize is re-rendered once the view has been still this long.
@@ -29,6 +31,16 @@ const TICK: f64 = 6.0;
 
 /// The shortest span that can be calibrated, in logical points on screen.
 const MIN_SPAN: f64 = 3.0;
+
+/// A measured area's outline.
+const OUTLINE: egui::Color32 = egui::Color32::from_rgb(0, 150, 190);
+
+/// The radius of an anchor dot, in logical points on screen.
+const ANCHOR_DOT: f32 = 3.0;
+
+/// How far a painted outline may stray from the true curve, in logical points
+/// on screen. Divided by zoom to get the flattening tolerance in page units.
+const FLATNESS: f64 = 0.25;
 
 /// What the current texture holds, and where it sits on the page.
 struct Rendered {
@@ -72,8 +84,12 @@ pub struct App {
     canvas: Rect,
     /// The scale of each calibrated page.
     calibrations: HashMap<usize, Calibration>,
+    /// The areas measured on each page.
+    measurements: HashMap<usize, Vec<Measurement>>,
     pick: Option<Pick>,
     entry: Option<Entry>,
+    /// Present while the area tool is armed.
+    pen: Option<Pen>,
     error: Option<String>,
 }
 
@@ -89,6 +105,8 @@ impl App {
         self.rendered = None;
         self.resettle_at = None;
         self.calibrations.clear();
+        self.measurements.clear();
+        self.pen = None;
         self.cancel_pick();
 
         match pdf::Document::open(&path) {
@@ -123,6 +141,16 @@ impl App {
                 self.refit = true;
                 self.rendered = None;
                 self.resettle_at = None;
+
+                // An outline belongs to the page it was traced on, and there
+                // is nothing to trace on a page with no scale.
+                if self.calibrations.contains_key(&index) {
+                    if let Some(pen) = &mut self.pen {
+                        pen.clear();
+                    }
+                } else {
+                    self.pen = None;
+                }
             }
             Err(message) => {
                 self.document = None;
@@ -169,6 +197,20 @@ impl App {
             }
             None => {}
         }
+    }
+
+    /// Records a closed outline as a measurement on the current page.
+    fn add_measurement(&mut self, outer: SubPath) {
+        let measurements = self.measurements.entry(self.page).or_default();
+        let name = format!("Area {}", measurements.len() + 1);
+
+        measurements.push(Measurement {
+            name,
+            outer,
+            holes: Vec::new(),
+            colour: OUTLINE,
+            visible: true,
+        });
     }
 
     fn page_rect(&self) -> Rect {
@@ -255,7 +297,23 @@ impl App {
 
             if ui.button("Calibrate").clicked() {
                 self.cancel_pick();
+                self.pen = None;
                 self.pick = Some(Pick::First);
+            }
+
+            let calibrated = self.calibrations.contains_key(&self.page);
+            let armed = self.pen.is_some();
+            let area = egui::Button::new("Area").selected(armed);
+
+            if ui.add_enabled(calibrated, area).clicked() {
+                self.cancel_pick();
+                self.pen = if armed { None } else { Some(Pen::default()) };
+            }
+
+            if !calibrated {
+                ui.label("Calibrate this page first");
+            } else if armed {
+                ui.label("Click to place corners, right-click to close");
             }
 
             match (&self.pick, self.calibrations.get(&self.page)) {
@@ -297,6 +355,9 @@ impl App {
 
         if escape {
             self.cancel_pick();
+            if let Some(pen) = &mut self.pen {
+                pen.clear();
+            }
         }
 
         if page_up && self.page > 0 {
@@ -348,6 +409,27 @@ impl App {
                 && let Some(pos) = response.interact_pointer_pos()
             {
                 self.pick_point(self.viewport.screen_to_page(to_kurbo_point(pos)));
+            }
+        }
+
+        // Tracing an outline. Left click places a corner, right click closes
+        // the outline back to the first one, however far away it is.
+        if self.pen.is_some() {
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+
+            if response.clicked()
+                && let Some(pos) = response.interact_pointer_pos()
+                && let Some(pen) = &mut self.pen
+            {
+                pen.place(self.viewport.screen_to_page(to_kurbo_point(pos)));
+            }
+
+            if response.secondary_clicked()
+                && let Some(outer) = self.pen.as_mut().and_then(Pen::close)
+            {
+                self.add_measurement(outer);
             }
         }
 
@@ -479,6 +561,90 @@ impl App {
             (_, Some(entry)) => self.draw_span(&painter, entry.from, entry.to),
             _ => {}
         }
+
+        for measurement in self.measurements.get(&self.page).into_iter().flatten() {
+            self.draw_measurement(&painter, measurement);
+        }
+
+        self.draw_pen(&painter, cursor);
+    }
+
+    /// A finished area: its outline, and what it encloses in real units.
+    fn draw_measurement(&self, painter: &egui::Painter, measurement: &Measurement) {
+        let outline = geom::outline(&measurement.outer, FLATNESS / self.viewport.zoom);
+        if outline.is_empty() {
+            return;
+        }
+
+        painter.add(egui::Shape::closed_line(
+            outline.iter().map(|&p| self.screen(p)).collect(),
+            egui::Stroke::new(1.5, measurement.colour),
+        ));
+
+        let Some(calibration) = self.calibrations.get(&self.page) else {
+            return;
+        };
+
+        self.draw_label(
+            painter,
+            geom::centre(&measurement.outer),
+            &area_label(
+                calibration.square_millimetres(geom::area(&measurement.outer)),
+                calibration.unit,
+            ),
+        );
+    }
+
+    /// The outline being traced: the corners placed so far, a rubber band to
+    /// the cursor, and a hint of the edge a right-click would close.
+    fn draw_pen(&self, painter: &egui::Painter, cursor: Option<Point>) {
+        let Some(pen) = &self.pen else {
+            return;
+        };
+        let anchors = pen.anchors();
+        let Some(first) = anchors.first() else {
+            return;
+        };
+
+        let stroke = egui::Stroke::new(1.5, OUTLINE);
+        painter.add(egui::Shape::line(
+            anchors.iter().map(|a| self.screen(a.pos)).collect(),
+            stroke,
+        ));
+
+        if let Some(cursor) = cursor {
+            let last = anchors.last().expect("checked above");
+            painter.line_segment([self.screen(last.pos), self.screen(cursor)], stroke);
+
+            if anchors.len() >= 2 {
+                painter.line_segment(
+                    [self.screen(cursor), self.screen(first.pos)],
+                    egui::Stroke::new(1.0, OUTLINE.gamma_multiply(0.4)),
+                );
+            }
+        }
+
+        for anchor in anchors {
+            painter.circle_filled(self.screen(anchor.pos), ANCHOR_DOT, OUTLINE);
+        }
+    }
+
+    /// A readable caption on the drawing, sized in logical points so it stays
+    /// legible at every zoom.
+    fn draw_label(&self, painter: &egui::Painter, at: Point, text: &str) {
+        let galley = painter.layout_no_wrap(
+            text.to_owned(),
+            egui::FontId::proportional(12.0),
+            egui::Color32::WHITE,
+        );
+        let rect = egui::Align2::CENTER_CENTER.anchor_size(self.screen(at), galley.size());
+
+        painter.rect_filled(rect.expand(4.0), 3, egui::Color32::from_black_alpha(190));
+        painter.galley(rect.min, galley, egui::Color32::WHITE);
+    }
+
+    fn screen(&self, page: Point) -> egui::Pos2 {
+        to_egui_pos(self.viewport.page_to_screen(page))
     }
 
     fn draw_span(&self, painter: &egui::Painter, from: Point, to: Point) {
@@ -500,6 +666,30 @@ impl App {
                     stroke,
                 );
             }
+        }
+    }
+}
+
+/// An area in the unit a person would actually read it in: square metres for a
+/// metric drawing, square feet for an imperial one, dropping to the small unit
+/// when the area is too small for the large one to say anything.
+fn area_label(square_millimetres: f64, unit: Unit) -> String {
+    if unit.is_metric() {
+        let square_metres = square_millimetres / 1e6;
+
+        if square_metres >= 0.01 {
+            format!("{square_metres:.2} m²")
+        } else {
+            format!("{square_millimetres:.0} mm²")
+        }
+    } else {
+        let square_inches = square_millimetres / (25.4 * 25.4);
+        let square_feet = square_inches / 144.0;
+
+        if square_feet >= 0.1 {
+            format!("{square_feet:.2} ft²")
+        } else {
+            format!("{square_inches:.1} in²")
         }
     }
 }

@@ -1,5 +1,7 @@
 mod doc;
+mod geom;
 mod pdf;
+mod tools;
 mod ui;
 mod viewport;
 
