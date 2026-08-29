@@ -162,6 +162,6 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: 3 — not started.** Slice 2 is accepted: the page pans, zooms
-about the cursor and steps between pages, rendering only the visible region.
+**Current slice: 4 — not started.** Slice 3 is accepted: picking two points and
+naming the distance between them sets a per-page scale that survives zooming.
 Update this line when a slice is accepted.
