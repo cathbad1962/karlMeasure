@@ -233,6 +233,16 @@ impl Input {
             };
             let command = !typing && i.modifiers.command;
 
+            // Ctrl+Shift+Alt+C never arrives as a key. The window layer turns
+            // any Ctrl+C into a clipboard copy and returns before the key
+            // event is made, paying no attention to the other modifiers. The
+            // copy it produces is what there is to listen for, and the
+            // modifiers held at the time are what tell it from a real one.
+            let calibrate = !typing
+                && i.modifiers.shift
+                && i.modifiers.alt
+                && i.events.contains(&egui::Event::Copy);
+
             // A tool's letter is the lower case one. Shift makes a different
             // binding, not the same one — `n` is Snap and `Shift+N` is not.
             let plain = |k| key(k) && !i.modifiers.shift && !i.modifiers.command;
@@ -245,11 +255,7 @@ impl Input {
                 delete: key(egui::Key::Delete) || key(egui::Key::Backspace),
                 undo: command && !i.modifiers.shift && key(egui::Key::Z),
                 redo: command && (key(egui::Key::Y) || (i.modifiers.shift && key(egui::Key::Z))),
-                tool: if i.modifiers.command
-                    && i.modifiers.shift
-                    && i.modifiers.alt
-                    && key(egui::Key::C)
-                {
+                tool: if calibrate {
                     Some(Tool::Calibrate)
                 } else if shifted(egui::Key::C) {
                     Some(Tool::AnchorPoint)
@@ -775,19 +781,10 @@ impl App {
                             self.take_up(Tool::Calibrate);
                         }
 
-                        // Area is the only kind of measurement there is, so
-                        // asking for one simply hands over the tool that draws
-                        // it. When there is a second kind, this is where the
-                        // choice between them will be made.
-                        let area = egui::Button::new("Area").selected(self.tool == Tool::Pen);
-                        if ui
-                            .add_sized([width, 24.0], area)
-                            .on_hover_text("Measure an area — takes up the Pen (p)")
-                            .clicked()
-                        {
-                            self.take_up(Tool::Pen);
-                        }
-
+                        // There is no Area button: area is the only kind of
+                        // measurement there is, so the button said nothing the
+                        // Pen does not. When there is a second kind, this is
+                        // where the choice between them will be made.
                         ui.add_enabled_ui(false, |ui| {
                             ui.add_sized([width, 24.0], egui::Button::new("Length"))
                                 .on_disabled_hover_text("Not in this project")
