@@ -1,5 +1,6 @@
 mod pdf;
 mod ui;
+mod viewport;
 
 use eframe::egui;
 

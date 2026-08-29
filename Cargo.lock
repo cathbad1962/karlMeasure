@@ -1666,6 +1666,7 @@ name = "karlMeasure"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "kurbo",
  "pdfium-render",
  "rfd",
 ]
