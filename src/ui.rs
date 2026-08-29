@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use kurbo::{Point, Rect, Size, Vec2};
+use kurbo::{Point, Rect, Shape, Size, Vec2};
 
 use crate::doc::{Anchor, Calibration, Measurement, Project, SubPath, Unit};
 use crate::geom;
@@ -75,13 +75,36 @@ const MAGNIFY: f64 = 4.0;
 /// cannot be done per frame.
 const LOUPE_SETTLE: Duration = Duration::from_millis(90);
 
-/// The tools, one of which is always the one in hand.
+/// The tools, one of which is always the one in hand. The names and keys
+/// follow the drawing applications this is meant to sit beside.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Tool {
+    /// `V` — a whole measurement at a time.
     #[default]
     Select,
-    Area,
+    /// `A` — the anchors and handles within one.
+    DirectSelect,
+    /// `P` — placing anchors to trace an outline.
+    Pen,
+    /// `Shift+C` — flipping an anchor between a corner and a smooth point.
+    AnchorPoint,
+    /// `+` — adding an anchor to a segment.
+    AddAnchor,
+    /// `-` — taking an anchor away.
+    DeleteAnchor,
+    /// Setting the page scale, from the measurement panel.
     Calibrate,
+}
+
+impl Tool {
+    /// Whether this tool works on the anchors of an outline, which is what
+    /// decides if the editor's hit-testing and its handles are in play.
+    fn edits_anchors(self) -> bool {
+        matches!(
+            self,
+            Self::DirectSelect | Self::AnchorPoint | Self::AddAnchor | Self::DeleteAnchor
+        )
+    }
 }
 
 /// The precision aids, which are toggles rather than tools.
@@ -128,14 +151,11 @@ struct Input {
     page_down: bool,
     escape: bool,
     delete: bool,
-    toggle: bool,
     undo: bool,
     redo: bool,
-    select: bool,
-    area: bool,
-    calibrate: bool,
+    /// The tool a key asked for, if one did.
+    tool: Option<Tool>,
     snap: bool,
-    magnifier: bool,
     scroll: f64,
     cursor: Option<egui::Pos2>,
     /// Where the button went down, while one is held.
@@ -160,14 +180,28 @@ impl Input {
                 page_down: key(egui::Key::PageDown),
                 escape: i.key_pressed(egui::Key::Escape),
                 delete: key(egui::Key::Delete) || key(egui::Key::Backspace),
-                toggle: key(egui::Key::S),
                 undo: command && !i.modifiers.shift && key(egui::Key::Z),
                 redo: command && (key(egui::Key::Y) || (i.modifiers.shift && key(egui::Key::Z))),
-                select: key(egui::Key::V),
-                area: i.modifiers.shift && i.modifiers.alt && key(egui::Key::A),
-                calibrate: i.modifiers.shift && i.modifiers.alt && key(egui::Key::C),
+                tool: if i.modifiers.shift && i.modifiers.alt && key(egui::Key::C) {
+                    Some(Tool::Calibrate)
+                } else if i.modifiers.shift && key(egui::Key::C) {
+                    Some(Tool::AnchorPoint)
+                } else if i.modifiers.shift {
+                    None
+                } else if key(egui::Key::V) {
+                    Some(Tool::Select)
+                } else if key(egui::Key::A) {
+                    Some(Tool::DirectSelect)
+                } else if key(egui::Key::P) {
+                    Some(Tool::Pen)
+                } else if key(egui::Key::Plus) || key(egui::Key::Equals) {
+                    Some(Tool::AddAnchor)
+                } else if key(egui::Key::Minus) {
+                    Some(Tool::DeleteAnchor)
+                } else {
+                    None
+                },
                 snap: key(egui::Key::N),
-                magnifier: key(egui::Key::M),
                 scroll: i.smooth_scroll_delta.y as f64,
                 cursor: i.pointer.hover_pos(),
                 pressed_at: i.pointer.press_origin(),
@@ -225,6 +259,8 @@ pub struct App {
     renaming: Option<usize>,
     /// Present while the edit tool is armed.
     editor: Option<Editor>,
+    /// The measurement selected as a whole, by the selection tool.
+    selected_measurement: Option<usize>,
     /// The magnified patch under the cursor, and when to re-render it.
     loupe: Option<Loupe>,
     loupe_settle: Option<Instant>,
@@ -290,7 +326,7 @@ impl App {
                 self.renaming = None;
                 self.loupe = None;
 
-                if self.tool == Tool::Area && !self.project.calibrations.contains_key(&index) {
+                if self.tool == Tool::Pen && !self.project.calibrations.contains_key(&index) {
                     self.take_up(Tool::Select);
                 } else {
                     self.take_up(self.tool);
@@ -325,9 +361,10 @@ impl App {
         self.tool = tool;
 
         match tool {
-            Tool::Select => self.editor = Some(Editor::default()),
-            Tool::Area => self.pen = Some(Pen::default()),
+            Tool::Pen => self.pen = Some(Pen::default()),
             Tool::Calibrate => self.pick = Some(Pick::First),
+            tool if tool.edits_anchors() => self.editor = Some(Editor::default()),
+            _ => {}
         }
     }
 
@@ -549,37 +586,57 @@ impl App {
                 Some(Pick::Second { .. }) => "Click the second point",
                 None => "Enter the distance between the two points",
             },
-            Tool::Area if !self.project.calibrations.contains_key(&self.page) => {
+            Tool::Pen if !self.project.calibrations.contains_key(&self.page) => {
                 "Calibrate this page before measuring areas on it"
             }
-            Tool::Area if self.pen_target.is_some() => "Tracing a hole; right-click to close",
-            Tool::Area => "Click to place corners, drag to curve, right-click to close",
-            Tool::Select => "Drag an anchor or handle; click an edge to add; Delete, S to toggle",
+            Tool::Pen if self.pen_target.is_some() => "Tracing a hole; right-click to close",
+            Tool::Pen => "Click to place corners, drag to curve, right-click to close",
+            Tool::Select => "Click an area to select it; Delete removes it",
+            Tool::DirectSelect => "Drag an anchor or a handle; Alt breaks a smooth pair",
+            Tool::AnchorPoint => "Click an anchor to flip it between a corner and a curve",
+            Tool::AddAnchor => "Click an edge to add an anchor to it",
+            Tool::DeleteAnchor => "Click an anchor to take it away",
         }
     }
 
     /// The tools, in a strip down the left: the ones that change what the
     /// pointer does, and the aids that change how precisely it does it.
     fn tool_strip(&mut self, ui: &mut egui::Ui) {
+        // The tools that work, in the order and with the keys they carry in
+        // the drawing applications this sits beside.
+        const TOOLS: [(Tool, &str, &str); 6] = [
+            (Tool::Select, "V", "Selection (V)"),
+            (Tool::DirectSelect, "A", "Direct Selection (A)"),
+            (Tool::Pen, "P", "Pen (P)"),
+            (Tool::AnchorPoint, "C", "Anchor Point (Shift+C)"),
+            (Tool::AddAnchor, "+", "Add Anchor Point (+)"),
+            (Tool::DeleteAnchor, "−", "Delete Anchor Point (−)"),
+        ];
+
+        // Labels only. Nothing lies behind these; CLAUDE.md §2 says which are
+        // unbuilt and which are meant to stay dark.
+        const PLACEHOLDERS: [(&str, &str); 7] = [
+            ("\\", "Line — not available"),
+            ("M", "Rectangle — not available"),
+            ("L", "Ellipse — not available"),
+            ("G", "Polygon — not available"),
+            ("Y", "Polyline — not available"),
+            ("T", "Type — not available"),
+            ("I", "Eyedropper — not available"),
+        ];
+
         egui::Panel::left("tools")
             .exact_size(46.0)
             .resizable(false)
             .show(ui, |ui| {
                 ui.add_space(6.0);
 
-                let calibrated = self.project.calibrations.contains_key(&self.page);
-
-                for (tool, letter, name, enabled) in [
-                    (Tool::Select, "V", "Select (V)", true),
-                    (Tool::Area, "A", "Area (Shift+Alt+A)", calibrated),
-                ] {
+                for (tool, letter, name) in TOOLS {
                     let button = egui::Button::new(letter).selected(self.tool == tool);
 
                     if ui
-                        .add_enabled_ui(enabled, |ui| {
-                            ui.add_sized([32.0, 28.0], button).on_hover_text(name)
-                        })
-                        .inner
+                        .add_sized([32.0, 28.0], button)
+                        .on_hover_text(name)
                         .clicked()
                     {
                         self.take_up(tool);
@@ -591,9 +648,22 @@ impl App {
                 ui.separator();
                 ui.add_space(6.0);
 
+                for (letter, name) in PLACEHOLDERS {
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.add_sized([32.0, 28.0], egui::Button::new(letter))
+                    })
+                    .response
+                    .on_hover_text(name);
+                    ui.add_space(2.0);
+                }
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+
                 for (on, letter, name) in [
                     (&mut self.assist.snap, "N", "Snap to anchors (N)"),
-                    (&mut self.assist.magnifier, "M", "Magnifier (M)"),
+                    (&mut self.assist.magnifier, "◎", "Magnifier"),
                 ] {
                     let button = egui::Button::new(letter).selected(*on);
 
@@ -620,31 +690,28 @@ impl App {
                     .default_open(true)
                     .show(ui, |ui| {
                         let width = ui.available_width();
-                        let calibrated = self.project.calibrations.contains_key(&self.page);
 
                         let calibrate =
                             egui::Button::new("Calibrate").selected(self.tool == Tool::Calibrate);
-                        if ui.add_sized([width, 24.0], calibrate).clicked() {
+                        if ui
+                            .add_sized([width, 24.0], calibrate)
+                            .on_hover_text("Shift+Alt+C")
+                            .clicked()
+                        {
                             self.take_up(Tool::Calibrate);
                         }
 
-                        let area = egui::Button::new("Area").selected(self.tool == Tool::Area);
-                        if ui
-                            .add_enabled_ui(calibrated, |ui| ui.add_sized([width, 24.0], area))
-                            .inner
-                            .on_hover_text("Shift+Alt+A")
-                            .clicked()
-                        {
-                            self.take_up(Tool::Area);
-                        }
+                        // Area is the only kind of measurement there is, so it
+                        // is always the kind in effect. When there is a second
+                        // kind, this is where the choice will be made.
+                        ui.add_sized([width, 24.0], egui::Button::new("Area").selected(true))
+                            .on_hover_text("Draw one with the Pen");
 
-                        // Placeholders only: these tools are out of scope, and
-                        // nothing behind these buttons exists.
-                        for name in ["Length", "Polyline"] {
-                            ui.add_enabled_ui(false, |ui| {
-                                ui.add_sized([width, 24.0], egui::Button::new(name))
-                            });
-                        }
+                        ui.add_enabled_ui(false, |ui| {
+                            ui.add_sized([width, 24.0], egui::Button::new("Length"))
+                        })
+                        .response
+                        .on_hover_text("Not available");
                     });
             });
     }
@@ -680,20 +747,11 @@ impl App {
             self.redo();
         }
 
-        if input.select {
-            self.take_up(Tool::Select);
-        }
-        if input.calibrate {
-            self.take_up(Tool::Calibrate);
-        }
-        if input.area && self.project.calibrations.contains_key(&self.page) {
-            self.take_up(Tool::Area);
+        if let Some(tool) = input.tool {
+            self.take_up(tool);
         }
         if input.snap {
             self.assist.snap = !self.assist.snap;
-        }
-        if input.magnifier {
-            self.assist.magnifier = !self.assist.magnifier;
         }
 
         if input.page_up && self.page > 0 {
@@ -803,6 +861,10 @@ impl App {
             self.edit_anchors(ui, &response, &input);
         }
 
+        if self.tool == Tool::Select {
+            self.select_measurement(ui, &response, &input);
+        }
+
         let settled = self.resettle_at.is_some_and(|at| now >= at);
         if self.rendered.is_none() || settled {
             self.render(ui.ctx(), canvas);
@@ -855,6 +917,9 @@ impl App {
                 let snapshot = self.project.clone();
                 let mut changed = false;
                 let mut renaming = self.renaming;
+                let selected = (self.tool == Tool::Select)
+                    .then_some(self.selected_measurement)
+                    .flatten();
                 let mut remove = None;
                 let mut hole_in = None;
 
@@ -865,6 +930,17 @@ impl App {
                     .expect("checked above");
 
                 for (index, measurement) in measurements.iter_mut().enumerate() {
+                    // The row of whatever the selection tool has hold of is
+                    // picked out, so the canvas and the list agree.
+                    if selected == Some(index) {
+                        let row = ui.available_rect_before_wrap();
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(row.min, egui::vec2(row.width(), 48.0)),
+                            2,
+                            SELECTED.gamma_multiply(0.15),
+                        );
+                    }
+
                     ui.horizontal(|ui| {
                         changed |= ui.checkbox(&mut measurement.visible, "").changed();
                         changed |= ui
@@ -928,7 +1004,7 @@ impl App {
                 }
 
                 if let Some(index) = hole_in {
-                    self.take_up(Tool::Area);
+                    self.take_up(Tool::Pen);
                     self.pen_target = Some(index);
                 }
             });
@@ -1095,16 +1171,32 @@ impl App {
             editor.origin = None;
         }
 
-        // A click selects what it lands on, or adds an anchor to the edge it
-        // lands on.
+        // What a click does is the tool's business: Direct Selection only
+        // selects, and each of the anchor tools does its own one thing.
         if response.clicked()
             && let Some(pos) = response.interact_pointer_pos()
         {
             let point = self.page_point(pos);
+            let found = self.hit(point, radius).map(|(selection, _)| selection);
 
-            let selected = match self.hit(point, radius) {
-                Some((selection, _)) => Some(selection),
-                None => self.edit(|measurements| tools::insert(measurements, point, radius)),
+            let selected = match self.tool {
+                Tool::DirectSelect => found,
+                Tool::AnchorPoint => {
+                    if let Some(selection) = found {
+                        self.edit(|m| tools::toggle(m, selection));
+                    }
+                    found
+                }
+                Tool::DeleteAnchor => {
+                    if let Some(selection) = found {
+                        self.edit(|m| tools::delete(m, selection));
+                    }
+                    None
+                }
+                Tool::AddAnchor => {
+                    self.edit(|measurements| tools::insert(measurements, point, radius))
+                }
+                _ => found,
             };
 
             if let Some(editor) = &mut self.editor {
@@ -1119,9 +1211,49 @@ impl App {
         if input.delete && self.edit(|m| tools::delete(m, selection)).is_some() {
             self.forget_selection();
         }
+    }
 
-        if input.toggle {
-            self.edit(|m| tools::toggle(m, selection));
+    /// Selecting a whole measurement: click its outline, or anywhere inside
+    /// it. Delete takes the selected one off the page.
+    fn select_measurement(&mut self, ui: &egui::Ui, response: &egui::Response, input: &Input) {
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+        }
+
+        if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let point = self.page_point(pos);
+            let reach = HIT / self.viewport.zoom;
+
+            self.selected_measurement = self
+                .project
+                .measurements
+                .get(&self.page)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter(|(_, measurement)| measurement.visible)
+                .find(|(_, measurement)| {
+                    let path = geom::bez_path(&measurement.outer);
+
+                    path.contains(point)
+                        || geom::nearest(&measurement.outer, point)
+                            .is_some_and(|found| found.distance <= reach)
+                })
+                .map(|(index, _)| index);
+        }
+
+        if input.delete
+            && let Some(index) = self.selected_measurement
+        {
+            let removed = self.edit(|measurements| {
+                (index < measurements.len()).then(|| measurements.remove(index))
+            });
+
+            if removed.is_some() {
+                self.selected_measurement = None;
+            }
         }
     }
 
@@ -1243,14 +1375,16 @@ impl App {
             _ => {}
         }
 
-        for measurement in self
+        for (index, measurement) in self
             .project
             .measurements
             .get(&self.page)
             .into_iter()
             .flatten()
+            .enumerate()
         {
-            self.draw_measurement(&painter, measurement);
+            let selected = self.tool == Tool::Select && self.selected_measurement == Some(index);
+            self.draw_measurement(&painter, measurement, selected);
         }
 
         self.draw_pen(&painter, cursor);
@@ -1275,11 +1409,13 @@ impl App {
         }
 
         match self.tool {
-            Tool::Area | Tool::Calibrate => true,
-            Tool::Select => self
+            Tool::Pen | Tool::Calibrate => true,
+            Tool::AnchorPoint | Tool::AddAnchor | Tool::DeleteAnchor => true,
+            Tool::DirectSelect => self
                 .editor
                 .as_ref()
                 .is_some_and(|editor| editor.grabbed.is_some()),
+            Tool::Select => false,
         }
     }
 
@@ -1448,12 +1584,14 @@ impl App {
 
     /// A finished area: its outline, the holes in it, and what it covers in
     /// real units once they are taken off.
-    fn draw_measurement(&self, painter: &egui::Painter, measurement: &Measurement) {
+    fn draw_measurement(&self, painter: &egui::Painter, measurement: &Measurement, selected: bool) {
         if !measurement.visible {
             return;
         }
 
-        let stroke = egui::Stroke::new(1.5, measurement.colour);
+        // The selected measurement is drawn heavier, which is all the
+        // selection tool has to say about it.
+        let stroke = egui::Stroke::new(if selected { 3.0 } else { 1.5 }, measurement.colour);
         let tolerance = FLATNESS / self.viewport.zoom;
 
         for subpath in std::iter::once(&measurement.outer).chain(&measurement.holes) {
