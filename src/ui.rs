@@ -1035,19 +1035,18 @@ impl App {
                 continue;
             }
 
-            for (at, anchor) in measurement.outer.anchors.iter().enumerate() {
-                let this = tools::Selection {
-                    measurement: index,
-                    anchor: at,
-                };
+            for (outline, subpath) in measurement.outlines() {
+                for (at, anchor) in subpath.anchors.iter().enumerate() {
+                    let this = tools::Selection {
+                        measurement: index,
+                        outline,
+                        anchor: at,
+                    };
 
-                if except != Some(this) {
-                    targets.push(anchor.pos);
+                    if except != Some(this) {
+                        targets.push(anchor.pos);
+                    }
                 }
-            }
-
-            for hole in &measurement.holes {
-                targets.extend(hole.anchors.iter().map(|anchor| anchor.pos));
             }
         }
 
@@ -1132,7 +1131,7 @@ impl App {
                 .and_then(|measurements| {
                     measurements
                         .get(found.0.measurement)?
-                        .outer
+                        .outline(found.0.outline)?
                         .anchors
                         .get(found.0.anchor)
                 })
@@ -1561,26 +1560,29 @@ impl App {
                 continue;
             }
 
-            for (at, anchor) in measurement.outer.anchors.iter().enumerate() {
-                let selected = editor.selected
-                    == Some(tools::Selection {
-                        measurement: index,
-                        anchor: at,
-                    });
+            for (outline, subpath) in measurement.outlines() {
+                for (at, anchor) in subpath.anchors.iter().enumerate() {
+                    let selected = editor.selected
+                        == Some(tools::Selection {
+                            measurement: index,
+                            outline,
+                            anchor: at,
+                        });
 
-                if selected {
-                    self.draw_handles(painter, anchor);
-                }
-
-                painter.circle_filled(
-                    self.screen(anchor.pos),
                     if selected {
-                        ANCHOR_DOT + 1.5
-                    } else {
-                        ANCHOR_DOT
-                    },
-                    if selected { SELECTED } else { OUTLINE },
-                );
+                        self.draw_handles(painter, anchor);
+                    }
+
+                    painter.circle_filled(
+                        self.screen(anchor.pos),
+                        if selected {
+                            ANCHOR_DOT + 1.5
+                        } else {
+                            ANCHOR_DOT
+                        },
+                        if selected { SELECTED } else { OUTLINE },
+                    );
+                }
             }
         }
     }

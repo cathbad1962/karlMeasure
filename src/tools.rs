@@ -3,7 +3,7 @@
 
 use kurbo::{Point, Vec2};
 
-use crate::doc::{Anchor, AnchorKind, Measurement, SubPath};
+use crate::doc::{Anchor, AnchorKind, Measurement, Outline, SubPath};
 use crate::geom;
 
 /// The fewest anchors that can enclose an area.
@@ -82,10 +82,11 @@ pub fn snap(point: Point, radius: f64, targets: impl Iterator<Item = Point>) -> 
         .map(|(target, _)| target)
 }
 
-/// Which anchor of which measurement on the page.
+/// Which anchor, of which outline, of which measurement on the page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
     pub measurement: usize,
+    pub outline: Outline,
     pub anchor: usize,
 }
 
@@ -129,15 +130,18 @@ impl Editor {
         }
 
         for (index, measurement) in visible(measurements) {
-            for (at, anchor) in measurement.outer.anchors.iter().enumerate() {
-                if (anchor.pos - point).hypot() <= radius {
-                    return Some((
-                        Selection {
-                            measurement: index,
-                            anchor: at,
-                        },
-                        Grab::Anchor,
-                    ));
+            for (outline, subpath) in measurement.outlines() {
+                for (at, anchor) in subpath.anchors.iter().enumerate() {
+                    if (anchor.pos - point).hypot() <= radius {
+                        return Some((
+                            Selection {
+                                measurement: index,
+                                outline,
+                                anchor: at,
+                            },
+                            Grab::Anchor,
+                        ));
+                    }
                 }
             }
         }
@@ -158,7 +162,7 @@ fn visible(measurements: &[Measurement]) -> impl Iterator<Item = (usize, &Measur
 fn anchor(measurements: &[Measurement], selection: Selection) -> Option<&Anchor> {
     measurements
         .get(selection.measurement)?
-        .outer
+        .outline(selection.outline)?
         .anchors
         .get(selection.anchor)
 }
@@ -166,7 +170,7 @@ fn anchor(measurements: &[Measurement], selection: Selection) -> Option<&Anchor>
 fn anchor_mut(measurements: &mut [Measurement], selection: Selection) -> Option<&mut Anchor> {
     measurements
         .get_mut(selection.measurement)?
-        .outer
+        .outline_mut(selection.outline)?
         .anchors
         .get_mut(selection.anchor)
 }
@@ -211,18 +215,26 @@ pub fn move_to(
 /// Inserts an anchor where `point` falls on an outline, if it falls within
 /// `radius` of one, and says which anchor to select next.
 pub fn insert(measurements: &mut [Measurement], point: Point, radius: f64) -> Option<Selection> {
-    let (index, found) = visible(measurements)
-        .filter_map(|(index, measurement)| Some((index, geom::nearest(&measurement.outer, point)?)))
-        .min_by(|a, b| a.1.distance.total_cmp(&b.1.distance))?;
+    let (index, outline, found) = visible(measurements)
+        .flat_map(|(index, measurement)| {
+            measurement
+                .outlines()
+                .filter_map(move |(outline, subpath)| {
+                    Some((index, outline, geom::nearest(subpath, point)?))
+                })
+        })
+        .min_by(|a, b| a.2.distance.total_cmp(&b.2.distance))?;
 
     if found.distance > radius {
         return None;
     }
 
-    let at = geom::insert_anchor(&mut measurements[index].outer, found.segment, found.t)?;
+    let subpath = measurements[index].outline_mut(outline)?;
+    let at = geom::insert_anchor(subpath, found.segment, found.t)?;
 
     Some(Selection {
         measurement: index,
+        outline,
         anchor: at,
     })
 }
@@ -230,7 +242,9 @@ pub fn insert(measurements: &mut [Measurement], point: Point, radius: f64) -> Op
 /// Removes the selected anchor, unless doing so would leave too few to enclose
 /// anything.
 pub fn delete(measurements: &mut [Measurement], selection: Selection) -> Option<()> {
-    let outline = &mut measurements.get_mut(selection.measurement)?.outer;
+    let outline = measurements
+        .get_mut(selection.measurement)?
+        .outline_mut(selection.outline)?;
 
     if outline.anchors.len() <= ENOUGH || selection.anchor >= outline.anchors.len() {
         return None;
@@ -245,7 +259,9 @@ pub fn delete(measurements: &mut [Measurement], selection: Selection) -> Option<
 /// takes its handles from the neighbours either side; sharpening collapses
 /// them, which leaves both edges straight.
 pub fn toggle(measurements: &mut [Measurement], selection: Selection) -> Option<()> {
-    let outline = &mut measurements.get_mut(selection.measurement)?.outer;
+    let outline = measurements
+        .get_mut(selection.measurement)?
+        .outline_mut(selection.outline)?;
     let count = outline.anchors.len();
 
     if count < ENOUGH || selection.anchor >= count {
@@ -345,9 +361,34 @@ mod tests {
         }]
     }
 
+    /// A square with a smaller square taken out of the middle of it.
+    fn square_with_a_hole() -> Vec<Measurement> {
+        let mut measurements = square();
+        let mut pen = Pen::default();
+
+        pen.place(Point::new(40.0, 40.0));
+        pen.place(Point::new(60.0, 40.0));
+        pen.place(Point::new(60.0, 60.0));
+        pen.place(Point::new(40.0, 60.0));
+
+        let hole = pen.close().expect("four anchors enclose an area");
+        measurements[0].holes.push(hole);
+
+        measurements
+    }
+
     fn at(measurement: usize, anchor: usize) -> Selection {
         Selection {
             measurement,
+            outline: Outline::Outer,
+            anchor,
+        }
+    }
+
+    fn in_hole(measurement: usize, hole: usize, anchor: usize) -> Selection {
+        Selection {
+            measurement,
+            outline: Outline::Hole(hole),
             anchor,
         }
     }
@@ -462,6 +503,59 @@ mod tests {
         assert_eq!(measurements[0].outer.anchors[1].kind, AnchorKind::Corner);
         assert_eq!(measurements[0].outer.anchors[1].in_handle, Vec2::ZERO);
         assert_eq!(measurements[0].outer.anchors[1].out_handle, Vec2::ZERO);
+    }
+
+    /// A hole's anchors are as reachable as an outline's, and addressed by
+    /// which hole they belong to.
+    #[test]
+    fn a_hole_can_be_reshaped_like_any_other_outline() {
+        let mut measurements = square_with_a_hole();
+        let editor = Editor::default();
+
+        assert_eq!(
+            editor.hit(&measurements, Point::new(60.0, 40.0), 5.0),
+            Some((in_hole(0, 0, 1), Grab::Anchor))
+        );
+
+        move_to(
+            &mut measurements,
+            in_hole(0, 0, 1),
+            Grab::Anchor,
+            Point::new(70.0, 40.0),
+            true,
+        );
+        assert_eq!(
+            measurements[0].holes[0].anchors[1].pos,
+            Point::new(70.0, 40.0)
+        );
+
+        assert_eq!(toggle(&mut measurements, in_hole(0, 0, 1)), Some(()));
+        assert_eq!(measurements[0].holes[0].anchors[1].kind, AnchorKind::Smooth);
+
+        assert_eq!(delete(&mut measurements, in_hole(0, 0, 1)), Some(()));
+        assert_eq!(measurements[0].holes[0].anchors.len(), 3);
+
+        // Three is as few as a hole can have, just as for an outline.
+        assert_eq!(delete(&mut measurements, in_hole(0, 0, 0)), None);
+        assert_eq!(
+            measurements[0].outer.anchors.len(),
+            4,
+            "the outline is untouched"
+        );
+    }
+
+    /// A click near a hole's edge adds to the hole, not to the outline it is
+    /// punched in.
+    #[test]
+    fn an_anchor_lands_on_the_outline_it_was_aimed_at() {
+        let mut measurements = square_with_a_hole();
+
+        assert_eq!(
+            insert(&mut measurements, Point::new(50.0, 41.0), 5.0),
+            Some(in_hole(0, 0, 1))
+        );
+        assert_eq!(measurements[0].holes[0].anchors.len(), 5);
+        assert_eq!(measurements[0].outer.anchors.len(), 4);
     }
 
     #[test]

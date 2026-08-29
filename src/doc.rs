@@ -142,6 +142,14 @@ pub struct SubPath {
     pub closed: bool,
 }
 
+/// Which outline of a measurement: the one round the outside, or one of the
+/// holes punched in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outline {
+    Outer,
+    Hole(usize),
+}
+
 /// A named area on a page: an outline, and the holes punched in it.
 #[derive(Clone, Debug)]
 pub struct Measurement {
@@ -150,6 +158,32 @@ pub struct Measurement {
     pub holes: Vec<SubPath>,
     pub colour: Color32,
     pub visible: bool,
+}
+
+impl Measurement {
+    pub fn outline(&self, which: Outline) -> Option<&SubPath> {
+        match which {
+            Outline::Outer => Some(&self.outer),
+            Outline::Hole(index) => self.holes.get(index),
+        }
+    }
+
+    pub fn outline_mut(&mut self, which: Outline) -> Option<&mut SubPath> {
+        match which {
+            Outline::Outer => Some(&mut self.outer),
+            Outline::Hole(index) => self.holes.get_mut(index),
+        }
+    }
+
+    /// Every outline in turn, outer first, each with the way to address it.
+    pub fn outlines(&self) -> impl Iterator<Item = (Outline, &SubPath)> {
+        std::iter::once((Outline::Outer, &self.outer)).chain(
+            self.holes
+                .iter()
+                .enumerate()
+                .map(|(index, hole)| (Outline::Hole(index), hole)),
+        )
+    }
 }
 
 /// Everything the user has built on the drawing, keyed by page.
