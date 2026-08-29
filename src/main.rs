@@ -18,6 +18,16 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Measure",
         options,
-        Box::new(|_cc| Ok(Box::<ui::App>::default())),
+        Box::new(|cc| {
+            // A tool strip of single letters is unreadable without its
+            // tooltips, and half a second of holding still is long enough to
+            // conclude there are none.
+            cc.egui_ctx.all_styles_mut(|style| {
+                style.interaction.tooltip_delay = 0.15;
+                style.interaction.show_tooltips_only_when_still = false;
+            });
+
+            Ok(Box::<ui::App>::default())
+        }),
     )
 }

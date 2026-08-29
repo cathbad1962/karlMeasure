@@ -214,7 +214,23 @@ impl Input {
         let typing = ui.ctx().egui_wants_keyboard_input();
 
         ui.input(|i| {
-            let key = |key| !typing && i.key_pressed(key);
+            // Matched on the physical key as well as the logical one. Holding
+            // Ctrl and Alt together is AltGr on Windows, and a layout may
+            // then produce no letter at all for the key that was pressed.
+            let key = |wanted: egui::Key| {
+                !typing
+                    && i.events.iter().any(|event| {
+                        matches!(
+                            event,
+                            egui::Event::Key {
+                                key,
+                                physical_key,
+                                pressed: true,
+                                ..
+                            } if *key == wanted || *physical_key == Some(wanted)
+                        )
+                    })
+            };
             let command = !typing && i.modifiers.command;
 
             // A tool's letter is the lower case one. Shift makes a different
@@ -229,11 +245,10 @@ impl Input {
                 delete: key(egui::Key::Delete) || key(egui::Key::Backspace),
                 undo: command && !i.modifiers.shift && key(egui::Key::Z),
                 redo: command && (key(egui::Key::Y) || (i.modifiers.shift && key(egui::Key::Z))),
-                tool: if !typing
-                    && i.modifiers.command
+                tool: if i.modifiers.command
                     && i.modifiers.shift
                     && i.modifiers.alt
-                    && i.key_pressed(egui::Key::C)
+                    && key(egui::Key::C)
                 {
                     Some(Tool::Calibrate)
                 } else if shifted(egui::Key::C) {
@@ -711,9 +726,8 @@ impl App {
                 for (letter, name) in PLACEHOLDERS {
                     ui.add_enabled_ui(false, |ui| {
                         ui.add_sized([32.0, 28.0], egui::Button::new(letter))
-                    })
-                    .response
-                    .on_hover_text(name);
+                            .on_disabled_hover_text(name)
+                    });
                     ui.add_space(2.0);
                 }
 
@@ -776,9 +790,8 @@ impl App {
 
                         ui.add_enabled_ui(false, |ui| {
                             ui.add_sized([width, 24.0], egui::Button::new("Length"))
-                        })
-                        .response
-                        .on_hover_text("Not available");
+                                .on_disabled_hover_text("Not in this project")
+                        });
                     });
             });
     }
