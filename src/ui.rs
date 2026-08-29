@@ -65,9 +65,8 @@ const DECIDED: f64 = 6.0;
 /// The ring drawn round the anchor a placement has caught.
 const SNAPPED: egui::Color32 = egui::Color32::from_rgb(255, 0, 160);
 
-/// The width of the column beside the tool strip, matching the measurements
-/// panel on the other side so the window sits evenly.
-const GROUPS_WIDTH: f32 = 320.0;
+/// How wide the panels start out.
+const PANEL_WIDTH: f32 = 320.0;
 
 /// The side of the magnifier, in logical points on screen.
 const LOUPE: f32 = 150.0;
@@ -320,6 +319,8 @@ pub struct App {
     /// Whether the column beside the tool strip is folded away. Held the
     /// negative way round so that starting open needs no ceremony.
     groups_hidden: bool,
+    /// How wide the measurements panel is, which the empty column matches.
+    panel_width: f32,
     pick: Option<Pick>,
     entry: Option<Entry>,
     /// Present while the area tool is armed.
@@ -804,8 +805,23 @@ impl App {
         // project has belongs in it. Everything that was here has moved: the
         // tools to the strip, and Length to a reserved shortcut in CLAUDE.md
         // rather than a button that does nothing.
+        //
+        // It is given the measurements panel's width outright rather than a
+        // default of its own. A default is only consulted the first time a
+        // panel is ever laid out, and the width is then remembered between
+        // runs, so changing one has no effect on a window that has already
+        // been opened once. Taking the width each frame also keeps the two
+        // sides even when either is dragged.
+        // Nothing has measured the other side yet on the very first frame.
+        let width = if self.panel_width > 0.0 {
+            self.panel_width
+        } else {
+            PANEL_WIDTH
+        };
+
         egui::Panel::left("tool_groups")
-            .default_size(GROUPS_WIDTH)
+            .exact_size(width)
+            .resizable(false)
             .show(ui, |_ui| {});
     }
 
@@ -992,8 +1008,8 @@ impl App {
     /// The list of what has been measured on this page, and everything that
     /// can be done to a measurement as a whole.
     fn measurements_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::right("measurements")
-            .default_size(320.0)
+        let panel = egui::Panel::right("measurements")
+            .default_size(PANEL_WIDTH)
             .show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.heading("Measurements");
@@ -1144,6 +1160,9 @@ impl App {
                     self.pen_target = Some(index);
                 }
             });
+
+        // What the empty column on the other side matches itself to.
+        self.panel_width = panel.response.rect.width();
     }
 
     /// Where a screen position falls on the page.
