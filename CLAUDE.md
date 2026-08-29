@@ -53,12 +53,21 @@ these:
 There is no second frontend. There is no server. Do not write abstractions that
 anticipate one.
 
-**One exception, decided at slice 8.** The measurement tool panel carries
-disabled placeholder buttons for Length and Polyline, so the panel's intended
-shape is visible while it is being built. They are labels and nothing else:
-no state, no tool, no code path reaches them, and no other code accounts for
-them. The tools themselves stay out of scope until they are given slices of
-their own. Do not grow this exception into a hook.
+**One exception, decided at slice 8.** The tool strip and the measurement panel
+carry disabled placeholder buttons, so their intended shape is visible while
+they are being built. They are labels and nothing else: no state, no tool, no
+code path reaches them, and no other code accounts for them. Do not grow this
+exception into a hook.
+
+Two kinds sit there, and the difference matters:
+
+- **Not yet built, and in scope one day:** Rectangle, Ellipse, Polygon. These
+  are only quicker ways to draw an area, which is what this application is
+  for. Each needs a slice of its own.
+- **Out of scope, and expected to stay dark:** Line, Polyline, Length, Type,
+  Eyedropper. The first three are linear measurement, Type is annotation, and
+  Eyedropper implies styling. Lighting any of them up means changing the list
+  above first.
 
 ---
 
