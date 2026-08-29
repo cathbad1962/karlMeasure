@@ -1,3 +1,4 @@
+mod doc;
 mod pdf;
 mod ui;
 mod viewport;
