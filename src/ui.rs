@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use kurbo::{Point, Rect, Shape, Size, Vec2};
 
-use crate::doc::{Anchor, Calibration, Measurement, Project, SubPath, Unit};
+use crate::doc::{Anchor, Calibration, Measurement, Outline, Project, SubPath, Unit};
 use crate::geom;
 use crate::pdf;
 use crate::tools::{self, Editor, Grab, Pen};
@@ -140,14 +140,14 @@ struct Scene<'a> {
 /// Whose anchors are worth showing.
 enum Showing {
     Every,
-    JustOne(usize),
+    JustOne(usize, Outline),
 }
 
 impl Showing {
-    fn includes(&self, measurement: usize) -> bool {
+    fn includes(&self, measurement: usize, outline: Outline) -> bool {
         match self {
             Self::Every => true,
-            Self::JustOne(index) => *index == measurement,
+            Self::JustOne(index, which) => *index == measurement && *which == outline,
         }
     }
 }
@@ -325,8 +325,10 @@ pub struct App {
     renaming: Option<usize>,
     /// Present while the edit tool is armed.
     editor: Option<Editor>,
-    /// The measurement selected as a whole, by the selection tool.
-    selected_measurement: Option<usize>,
+    /// What the selection tool has hold of: a measurement, by one of its
+    /// outlines. Clicking inside a hole takes the hole rather than the area
+    /// it is cut from, which is what makes a hole removable.
+    selected_shape: Option<(usize, Outline)>,
     /// A measurement being dragged bodily: which one, how it was before the
     /// drag began, and the page point the drag started from.
     moving: Option<(usize, Box<Measurement>, Point)>,
@@ -679,13 +681,14 @@ impl App {
     fn tool_strip(&mut self, ui: &mut egui::Ui) {
         // The tools that work, in the order and with the keys they carry in
         // the drawing applications this sits beside.
-        const TOOLS: [(Tool, &str, &str); 6] = [
+        const TOOLS: [(Tool, &str, &str); 7] = [
             (Tool::Select, "v", "Selection (v)"),
             (Tool::DirectSelect, "a", "Direct Selection (a)"),
             (Tool::Pen, "p", "Pen (p)"),
             (Tool::AnchorPoint, "⇧C", "Anchor Point (Shift+c)"),
             (Tool::AddAnchor, "+", "Add Anchor Point (+)"),
             (Tool::DeleteAnchor, "−", "Delete Anchor Point (−)"),
+            (Tool::Calibrate, "u", "Calibrate the page scale (u)"),
         ];
 
         // Labels only, holding letters for a later project. Nothing lies
@@ -693,7 +696,7 @@ impl App {
         const PLACEHOLDERS: [(&str, &str); 7] = [
             ("\\", "Line — not in this project"),
             ("m", "Rectangle — not in this project"),
-            ("l", "Ellipse — not in this project"),
+            ("o", "Ellipse — not in this project"),
             ("⇧P", "Polygon — not in this project"),
             ("⇧N", "Polyline — not in this project"),
             ("t", "Type — not in this project"),
@@ -754,37 +757,15 @@ impl App {
     }
 
     /// The measurement tools, grouped and collapsible.
-    fn tool_groups(&mut self, ui: &mut egui::Ui) {
+    fn tool_groups(&mut self, _ui: &mut egui::Ui) {
+        // Deliberately empty. The column is here to hold the space for the
+        // groups of tools a later project will fill it with; nothing this
+        // project has belongs in it. Everything that was here has moved: the
+        // tools to the strip, and Length to a reserved shortcut in CLAUDE.md
+        // rather than a button that does nothing.
         egui::Panel::left("tool_groups")
             .default_size(170.0)
-            .show(ui, |ui| {
-                ui.add_space(4.0);
-
-                egui::CollapsingHeader::new("Measurement")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        let width = ui.available_width();
-
-                        let calibrate =
-                            egui::Button::new("Calibrate").selected(self.tool == Tool::Calibrate);
-                        if ui
-                            .add_sized([width, 24.0], calibrate)
-                            .on_hover_text("Calibrate the page scale (u)")
-                            .clicked()
-                        {
-                            self.take_up(Tool::Calibrate);
-                        }
-
-                        // There is no Area button: area is the only kind of
-                        // measurement there is, so the button said nothing the
-                        // Pen does not. When there is a second kind, this is
-                        // where the choice between them will be made.
-                        ui.add_enabled_ui(false, |ui| {
-                            ui.add_sized([width, 24.0], egui::Button::new("Length"))
-                                .on_disabled_hover_text("Not in this project")
-                        });
-                    });
-            });
+            .show(_ui, |_ui| {});
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
@@ -998,9 +979,10 @@ impl App {
                 let mut changed = false;
                 let mut renaming = self.renaming;
                 let selected = (self.tool == Tool::Select)
-                    .then_some(self.selected_measurement)
+                    .then_some(self.selected_shape)
                     .flatten();
                 let mut remove = None;
+                let mut remove_hole = None;
                 let mut hole_in = None;
 
                 let measurements = self
@@ -1012,7 +994,7 @@ impl App {
                 for (index, measurement) in measurements.iter_mut().enumerate() {
                     // The row of whatever the selection tool has hold of is
                     // picked out, so the canvas and the list agree.
-                    if selected == Some(index) {
+                    if selected.map(|(index, _)| index) == Some(index) {
                         let row = ui.available_rect_before_wrap();
                         ui.painter().rect_filled(
                             egui::Rect::from_min_size(row.min, egui::vec2(row.width(), 48.0)),
@@ -1047,10 +1029,6 @@ impl App {
                             calibration.unit,
                         ));
 
-                        if !measurement.holes.is_empty() {
-                            ui.weak(format!("less {} holes", measurement.holes.len()));
-                        }
-
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Remove").clicked() {
                                 remove = Some(index);
@@ -1060,6 +1038,34 @@ impl App {
                             }
                         });
                     });
+
+                    // Each hole, with what it takes off and a way to take it
+                    // out again.
+                    for (hole, subpath) in measurement.holes.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            ui.weak(format!("Hole {}", hole + 1));
+                            ui.weak(format!(
+                                "− {}",
+                                area_label(
+                                    calibration.square_millimetres(geom::taken_by(
+                                        &measurement.outer,
+                                        subpath
+                                    )),
+                                    calibration.unit,
+                                )
+                            ));
+
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("Remove").clicked() {
+                                        remove_hole = Some((index, hole));
+                                    }
+                                },
+                            );
+                        });
+                    }
 
                     ui.separator();
                 }
@@ -1071,6 +1077,14 @@ impl App {
                     changed = true;
                 }
 
+                if let Some((index, hole)) = remove_hole
+                    && let Some(measurement) = measurements.get_mut(index)
+                    && hole < measurement.holes.len()
+                {
+                    measurement.holes.remove(hole);
+                    changed = true;
+                }
+
                 self.renaming = renaming;
 
                 if changed {
@@ -1078,8 +1092,9 @@ impl App {
                     self.redo.clear();
                 }
 
-                if remove.is_some() {
+                if remove.is_some() || remove_hole.is_some() {
                     // The indices everything else was holding have moved.
+                    self.selected_shape = None;
                     self.take_up(Tool::Select);
                 }
 
@@ -1317,7 +1332,7 @@ impl App {
     /// The measurement being worked on, whether it was taken hold of whole or
     /// by one of its anchors.
     fn current_measurement(&self) -> Option<usize> {
-        self.selected_measurement.or_else(|| {
+        self.selected_shape.map(|(index, _)| index).or_else(|| {
             self.editor
                 .as_ref()?
                 .selected
@@ -1325,28 +1340,46 @@ impl App {
         })
     }
 
-    /// What lies under a page point, taking the whole measurement rather than
-    /// any part of it: inside its outline, or close enough to the edge.
-    fn measurement_at(&self, point: Point) -> Option<usize> {
+    /// What lies under a page point, taken whole: a hole if the point is in
+    /// one, otherwise the area itself, from inside it or near its edge.
+    ///
+    /// Holes come first because a point inside one is inside the outline too,
+    /// and the hole is the smaller, more particular thing to have meant.
+    fn shape_at(&self, point: Point) -> Option<(usize, Outline)> {
         let reach = HIT / self.viewport.zoom;
 
-        self.project
-            .measurements
-            .get(&self.page)
-            .into_iter()
-            .flatten()
+        let within = |subpath: &SubPath| {
+            geom::bez_path(subpath).contains(point)
+                || geom::nearest(subpath, point).is_some_and(|found| found.distance <= reach)
+        };
+
+        // Later measurements are drawn over earlier ones, so they are the
+        // ones a click means.
+        let measurements = self.project.measurements.get(&self.page)?;
+
+        measurements
+            .iter()
             .enumerate()
+            .rev()
             .filter(|(_, measurement)| measurement.visible)
-            .find(|(_, measurement)| {
-                geom::bez_path(&measurement.outer).contains(point)
-                    || geom::nearest(&measurement.outer, point)
-                        .is_some_and(|found| found.distance <= reach)
+            .find_map(|(index, measurement)| {
+                let hole = measurement
+                    .holes
+                    .iter()
+                    .position(&within)
+                    .map(Outline::Hole);
+
+                match hole {
+                    Some(outline) => Some((index, outline)),
+                    None if within(&measurement.outer) => Some((index, Outline::Outer)),
+                    None => None,
+                }
             })
-            .map(|(index, _)| index)
     }
 
-    /// Selecting a whole measurement: click its outline, or anywhere inside
-    /// it. Dragging moves it bodily; Delete takes it off the page.
+    /// Selecting with the selection tool: click an area, or a hole in one.
+    /// Dragging moves the whole area; Delete takes off whatever is selected —
+    /// the area, or just the hole.
     fn select_measurement(&mut self, ui: &egui::Ui, response: &egui::Response, input: &Input) {
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
@@ -1355,7 +1388,7 @@ impl App {
         if response.clicked()
             && let Some(pos) = response.interact_pointer_pos()
         {
-            self.selected_measurement = self.measurement_at(self.page_point(pos));
+            self.selected_shape = self.shape_at(self.page_point(pos));
         }
 
         // A drag takes hold of whatever it started on, and moves it as one
@@ -1365,9 +1398,9 @@ impl App {
         {
             let from = self.page_point(origin);
 
-            if let Some(index) = self.measurement_at(from) {
+            if let Some((index, outline)) = self.shape_at(from) {
                 self.commit();
-                self.selected_measurement = Some(index);
+                self.selected_shape = Some((index, outline));
 
                 let held = self
                     .project
@@ -1407,14 +1440,22 @@ impl App {
         }
 
         if input.delete
-            && let Some(index) = self.selected_measurement
+            && let Some((index, outline)) = self.selected_shape
         {
-            let removed = self.edit(|measurements| {
-                (index < measurements.len()).then(|| measurements.remove(index))
+            let removed = self.edit(|measurements| match outline {
+                Outline::Outer => (index < measurements.len()).then(|| measurements.remove(index)),
+                Outline::Hole(hole) => {
+                    let measurement = measurements.get_mut(index)?;
+
+                    (hole < measurement.holes.len()).then(|| {
+                        measurement.holes.remove(hole);
+                        measurement.clone()
+                    })
+                }
             });
 
             if removed.is_some() {
-                self.selected_measurement = None;
+                self.selected_shape = None;
             }
         }
     }
@@ -1561,7 +1602,12 @@ impl App {
             .flatten()
             .enumerate()
         {
-            let selected = self.tool == Tool::Select && self.selected_measurement == Some(index);
+            let selected = self
+                .selected_shape
+                .filter(|_| self.tool == Tool::Select)
+                .filter(|(selected, _)| *selected == index)
+                .map(|(_, outline)| outline);
+
             self.draw_measurement(scene, measurement, selected);
         }
 
@@ -1732,8 +1778,8 @@ impl App {
     fn draw_anchors(&self, scene: &Scene) {
         let showing = match self.tool {
             tool if tool.edits_anchors() => Showing::Every,
-            Tool::Select => match self.selected_measurement {
-                Some(index) => Showing::JustOne(index),
+            Tool::Select => match self.selected_shape {
+                Some((index, outline)) => Showing::JustOne(index, outline),
                 None => return,
             },
             _ => return,
@@ -1749,11 +1795,15 @@ impl App {
             .flatten()
             .enumerate()
         {
-            if !measurement.visible || !showing.includes(index) {
+            if !measurement.visible {
                 continue;
             }
 
             for (outline, subpath) in measurement.outlines() {
+                if !showing.includes(index, outline) {
+                    continue;
+                }
+
                 for (at, anchor) in subpath.anchors.iter().enumerate() {
                     let is_selected = selected
                         == Some(tools::Selection {
@@ -1782,24 +1832,30 @@ impl App {
 
     /// A finished area: its outline, the holes in it, and what it covers in
     /// real units once they are taken off.
-    fn draw_measurement(&self, scene: &Scene, measurement: &Measurement, selected: bool) {
+    fn draw_measurement(
+        &self,
+        scene: &Scene,
+        measurement: &Measurement,
+        selected: Option<Outline>,
+    ) {
         if !measurement.visible {
             return;
         }
 
-        // The selected measurement is drawn heavier, which is all the
-        // selection tool has to say about it.
-        let stroke = egui::Stroke::new(if selected { 3.0 } else { 1.5 }, measurement.colour);
-
-        for (_, subpath) in measurement.outlines() {
+        for (which, subpath) in measurement.outlines() {
             let outline = geom::outline(subpath, scene.flatness());
             if outline.len() < 2 {
                 continue;
             }
 
+            // Whatever is selected is drawn heavier, which is all the
+            // selection tool has to say about it. Selecting a hole picks out
+            // the hole alone, since that is what Delete would take off.
+            let weight = if selected == Some(which) { 3.0 } else { 1.5 };
+
             scene.painter.add(egui::Shape::closed_line(
                 outline.iter().map(|&p| scene.at(p)).collect(),
-                stroke,
+                egui::Stroke::new(weight, measurement.colour),
             ));
         }
 

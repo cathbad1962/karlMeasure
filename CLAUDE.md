@@ -60,7 +60,9 @@ to fill in. They are labels and nothing else: no state, no tool, no code path
 reaches them, and no other code accounts for them.
 
 Shortcuts are reserved the same way. `Shift+Alt+C` is held for a format
-painter and must not be bound to anything else. No shortcut may pair Ctrl with
+painter, and `Shift+Alt+L` for Length, and neither may be bound to anything
+else. The second column of the interface is deliberately empty for the same
+reason: it holds the space for a later project's tool groups. No shortcut may pair Ctrl with
 `C`, `X` or `V`: the window layer turns those into clipboard events and returns
 before a key event exists, so they cannot reach this application at all.
 

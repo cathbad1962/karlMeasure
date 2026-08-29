@@ -45,7 +45,7 @@ fn push_segment(path: &mut BezPath, from: &Anchor, to: &Anchor) {
 /// The signed area a closed subpath encloses, in square page points.
 ///
 /// Computed analytically from the curve, never from the flattened outline. The
-/// sign follows the direction it was traced, which is the whole mechanism by
+/// sign follows the direction it was traced, which is the w.map(|hole| taken_by(&measurement.outer, hole)) mechanism by
 /// which holes subtract.
 pub fn signed_area(subpath: &SubPath) -> f64 {
     if !subpath.closed || subpath.anchors.len() < 3 {
@@ -75,14 +75,15 @@ pub fn measurement_area(measurement: &Measurement) -> f64 {
     let taken: f64 = measurement
         .holes
         .iter()
-        .map(|hole| overlap(&measurement.outer, hole))
+        .map(|hole| taken_by(&measurement.outer, hole))
         .sum();
 
     (outer - taken).max(0.0)
 }
 
-/// The area two closed outlines have in common, in square page points.
-fn overlap(outer: &SubPath, hole: &SubPath) -> f64 {
+/// What a hole takes off its outline: the area the two have in common, in
+/// square page points.
+pub fn taken_by(outer: &SubPath, hole: &SubPath) -> f64 {
     let alone = signed_area(hole).abs();
     if alone == 0.0 {
         return 0.0;
