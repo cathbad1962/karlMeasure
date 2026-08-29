@@ -162,6 +162,6 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: 4 — not started.** Slice 3 is accepted: picking two points and
-naming the distance between them sets a per-page scale that survives zooming.
+**Current slice: 5 — not started.** Slice 4 is accepted: corner anchors trace a
+closed outline, right-click closes it, and its area is reported in real units.
 Update this line when a slice is accepted.
