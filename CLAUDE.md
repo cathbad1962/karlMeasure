@@ -162,6 +162,7 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: 5 — not started.** Slice 4 is accepted: corner anchors trace a
-closed outline, right-click closes it, and its area is reported in real units.
+**Current slice: 7 — not started.** Slices 5 and 6 are accepted: dragging while
+placing pulls mirrored handles, and a placed anchor can be moved, inserted,
+deleted or toggled, with undo and redo behind every change.
 Update this line when a slice is accepted.
