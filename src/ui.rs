@@ -1,15 +1,14 @@
 //! The application window: open a drawing, pan and zoom it, step through pages.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use kurbo::{Point, Rect, Size, Vec2};
 
-use crate::doc::{Anchor, Calibration, Measurement, SubPath, Unit};
+use crate::doc::{Anchor, Calibration, Measurement, Project, SubPath, Unit};
 use crate::geom;
 use crate::pdf;
-use crate::tools::Pen;
+use crate::tools::{self, Editor, Grab, Pen};
 use crate::viewport::Viewport;
 
 /// A pan, zoom or resize is re-rendered once the view has been still this long.
@@ -44,6 +43,13 @@ const HANDLE: egui::Color32 = egui::Color32::from_rgb(120, 195, 225);
 /// The radius of a handle's end dot, in logical points on screen.
 const HANDLE_DOT: f32 = 2.5;
 
+/// How close a click has to land to take hold of something, in logical points
+/// on screen. Divided by zoom to get the reach in page units.
+const HIT: f64 = 8.0;
+
+/// The anchor under the cursor's attention.
+const SELECTED: egui::Color32 = egui::Color32::from_rgb(255, 210, 80);
+
 /// How far a painted outline may stray from the true curve, in logical points
 /// on screen. Divided by zoom to get the flattening tolerance in page units.
 const FLATNESS: f64 = 0.25;
@@ -60,6 +66,46 @@ struct Rendered {
 enum Pick {
     First,
     Second { from: Point },
+}
+
+/// The keys, wheel and pointer as they stand this frame.
+struct Input {
+    page_up: bool,
+    page_down: bool,
+    escape: bool,
+    delete: bool,
+    toggle: bool,
+    undo: bool,
+    redo: bool,
+    scroll: f64,
+    cursor: Option<egui::Pos2>,
+    /// Where the button went down, while one is held.
+    pressed_at: Option<egui::Pos2>,
+    alt: bool,
+}
+
+impl Input {
+    fn read(ui: &egui::Ui) -> Self {
+        ui.input(|i| {
+            let command = i.modifiers.command;
+
+            Self {
+                page_up: i.key_pressed(egui::Key::PageUp),
+                page_down: i.key_pressed(egui::Key::PageDown),
+                escape: i.key_pressed(egui::Key::Escape),
+                delete: i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+                toggle: i.key_pressed(egui::Key::S),
+                undo: command && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
+                redo: command
+                    && (i.key_pressed(egui::Key::Y)
+                        || (i.modifiers.shift && i.key_pressed(egui::Key::Z))),
+                scroll: i.smooth_scroll_delta.y as f64,
+                cursor: i.pointer.hover_pos(),
+                pressed_at: i.pointer.press_origin(),
+                alt: i.modifiers.alt,
+            }
+        })
+    }
 }
 
 /// Both ends are picked; the real distance between them is being typed in.
@@ -88,14 +134,17 @@ pub struct App {
     refit: bool,
     /// The canvas as it was last frame, to notice window resizes.
     canvas: Rect,
-    /// The scale of each calibrated page.
-    calibrations: HashMap<usize, Calibration>,
-    /// The areas measured on each page.
-    measurements: HashMap<usize, Vec<Measurement>>,
+    /// Everything the user has built on the drawing.
+    project: Project,
+    /// States to go back to, and the ones undone out of.
+    undo: Vec<Project>,
+    redo: Vec<Project>,
     pick: Option<Pick>,
     entry: Option<Entry>,
     /// Present while the area tool is armed.
     pen: Option<Pen>,
+    /// Present while the edit tool is armed.
+    editor: Option<Editor>,
     error: Option<String>,
 }
 
@@ -110,10 +159,10 @@ impl App {
 
         self.rendered = None;
         self.resettle_at = None;
-        self.calibrations.clear();
-        self.measurements.clear();
-        self.pen = None;
-        self.cancel_pick();
+        self.project = Project::default();
+        self.undo.clear();
+        self.redo.clear();
+        self.disarm();
 
         match pdf::Document::open(&path) {
             Ok(document) => {
@@ -150,12 +199,20 @@ impl App {
 
                 // An outline belongs to the page it was traced on, and there
                 // is nothing to trace on a page with no scale.
-                if self.calibrations.contains_key(&index) {
+                if self.project.calibrations.contains_key(&index) {
                     if let Some(pen) = &mut self.pen {
                         pen.clear();
                     }
                 } else {
                     self.pen = None;
+                }
+
+                // A selection indexes into one page's measurements, so it
+                // means nothing on another.
+                if self.project.measurements.contains_key(&index) {
+                    self.forget_selection();
+                } else {
+                    self.editor = None;
                 }
             }
             Err(message) => {
@@ -175,6 +232,60 @@ impl App {
     fn cancel_pick(&mut self) {
         self.pick = None;
         self.entry = None;
+    }
+
+    /// Puts every tool away. Only one is ever armed at a time.
+    fn disarm(&mut self) {
+        self.cancel_pick();
+        self.pen = None;
+        self.editor = None;
+    }
+
+    /// Keeps the state as it stands, so the operation about to change it can
+    /// be undone. Anything undone is discarded, since the history is a line
+    /// rather than a tree.
+    fn commit(&mut self) {
+        self.undo.push(self.project.clone());
+        self.redo.clear();
+    }
+
+    /// Runs a change against the current page's measurements, keeping a
+    /// snapshot only if the change reports it did something.
+    fn edit<T>(&mut self, change: impl FnOnce(&mut Vec<Measurement>) -> Option<T>) -> Option<T> {
+        let snapshot = self.project.clone();
+        let outcome = change(self.project.measurements.entry(self.page).or_default());
+
+        if outcome.is_some() {
+            self.undo.push(snapshot);
+            self.redo.clear();
+        }
+
+        outcome
+    }
+
+    fn undo(&mut self) {
+        if let Some(previous) = self.undo.pop() {
+            let current = std::mem::replace(&mut self.project, previous);
+            self.redo.push(current);
+            self.forget_selection();
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(next) = self.redo.pop() {
+            let current = std::mem::replace(&mut self.project, next);
+            self.undo.push(current);
+            self.forget_selection();
+        }
+    }
+
+    /// A selection is a pair of indices into the measurements, which the state
+    /// it was made against no longer guarantees.
+    fn forget_selection(&mut self) {
+        if let Some(editor) = &mut self.editor {
+            editor.selected = None;
+            editor.grabbed = None;
+        }
     }
 
     /// Takes a click while calibrating: the first ends up as one end of the
@@ -207,7 +318,9 @@ impl App {
 
     /// Records a closed outline as a measurement on the current page.
     fn add_measurement(&mut self, outer: SubPath) {
-        let measurements = self.measurements.entry(self.page).or_default();
+        self.commit();
+
+        let measurements = self.project.measurements.entry(self.page).or_default();
         let name = format!("Area {}", measurements.len() + 1);
 
         measurements.push(Measurement {
@@ -301,28 +414,66 @@ impl App {
 
             ui.separator();
 
-            if ui.button("Calibrate").clicked() {
-                self.cancel_pick();
-                self.pen = None;
+            let calibrating = self.pick.is_some() || self.entry.is_some();
+            if ui
+                .add(egui::Button::new("Calibrate").selected(calibrating))
+                .clicked()
+            {
+                self.disarm();
                 self.pick = Some(Pick::First);
             }
 
-            let calibrated = self.calibrations.contains_key(&self.page);
-            let armed = self.pen.is_some();
-            let area = egui::Button::new("Area").selected(armed);
+            let calibrated = self.project.calibrations.contains_key(&self.page);
+            let tracing = self.pen.is_some();
+            let area = egui::Button::new("Area").selected(tracing);
 
             if ui.add_enabled(calibrated, area).clicked() {
-                self.cancel_pick();
-                self.pen = if armed { None } else { Some(Pen::default()) };
+                self.disarm();
+                self.pen = if tracing { None } else { Some(Pen::default()) };
+            }
+
+            let traced = self
+                .project
+                .measurements
+                .get(&self.page)
+                .is_some_and(|measurements| !measurements.is_empty());
+            let editing = self.editor.is_some();
+            let edit = egui::Button::new("Edit").selected(editing);
+
+            if ui.add_enabled(traced, edit).clicked() {
+                self.disarm();
+                self.editor = if editing {
+                    None
+                } else {
+                    Some(Editor::default())
+                };
+            }
+
+            ui.separator();
+
+            if ui
+                .add_enabled(!self.undo.is_empty(), egui::Button::new("↶"))
+                .clicked()
+            {
+                self.undo();
+            }
+
+            if ui
+                .add_enabled(!self.redo.is_empty(), egui::Button::new("↷"))
+                .clicked()
+            {
+                self.redo();
             }
 
             if !calibrated {
                 ui.label("Calibrate this page first");
-            } else if armed {
+            } else if tracing {
                 ui.label("Click to place corners, right-click to close");
+            } else if editing {
+                ui.label("Drag an anchor or handle; click an edge to add; Delete, S to toggle");
             }
 
-            match (&self.pick, self.calibrations.get(&self.page)) {
+            match (&self.pick, self.project.calibrations.get(&self.page)) {
                 (Some(Pick::First), _) => {
                     ui.label("Click the first point");
                 }
@@ -349,29 +500,28 @@ impl App {
         let canvas = to_kurbo_rect(canvas);
         let now = Instant::now();
 
-        let (page_up, page_down, escape, scroll, cursor, pressed_at, alt) = ui.input(|i| {
-            (
-                i.key_pressed(egui::Key::PageUp),
-                i.key_pressed(egui::Key::PageDown),
-                i.key_pressed(egui::Key::Escape),
-                i.smooth_scroll_delta.y as f64,
-                i.pointer.hover_pos(),
-                i.pointer.press_origin(),
-                i.modifiers.alt,
-            )
-        });
+        let input = Input::read(ui);
+        let (scroll, cursor, pressed_at, alt) =
+            (input.scroll, input.cursor, input.pressed_at, input.alt);
 
-        if escape {
+        if input.escape {
             self.cancel_pick();
             if let Some(pen) = &mut self.pen {
                 pen.clear();
             }
         }
 
-        if page_up && self.page > 0 {
+        if input.undo {
+            self.undo();
+        }
+        if input.redo {
+            self.redo();
+        }
+
+        if input.page_up && self.page > 0 {
             self.show_page(self.page - 1);
         }
-        if page_down && self.page + 1 < self.page_count {
+        if input.page_down && self.page + 1 < self.page_count {
             self.show_page(self.page + 1);
         }
 
@@ -463,6 +613,10 @@ impl App {
             }
         }
 
+        if self.editor.is_some() {
+            self.edit_anchors(ui, &response, &input);
+        }
+
         let settled = self.resettle_at.is_some_and(|at| now >= at);
         if self.rendered.is_none() || settled {
             self.render(ui.ctx(), canvas);
@@ -473,6 +627,96 @@ impl App {
         let cursor = cursor.map(|pos| self.viewport.screen_to_page(to_kurbo_point(pos)));
         self.paint(ui, canvas, cursor);
         self.distance_entry(ui);
+    }
+
+    /// Where a screen position falls on the page.
+    fn page_point(&self, pos: egui::Pos2) -> Point {
+        self.viewport.screen_to_page(to_kurbo_point(pos))
+    }
+
+    /// What lies under a page-space point: a handle of the selected anchor, or
+    /// any anchor on the page.
+    fn hit(&self, point: Point, radius: f64) -> Option<(tools::Selection, Grab)> {
+        let editor = self.editor.as_ref()?;
+        let measurements = self.project.measurements.get(&self.page)?;
+
+        editor.hit(measurements, point, radius)
+    }
+
+    /// Reshaping an outline that is already traced: select an anchor, drag it
+    /// or one of its handles, insert one on an edge, delete one, or flip it
+    /// between a corner and a smooth point.
+    fn edit_anchors(&mut self, ui: &egui::Ui, response: &egui::Response, input: &Input) {
+        // Everything a hand aims at is sized on screen and divided by the
+        // zoom, so it stays the same target however far the drawing is zoomed.
+        let radius = HIT / self.viewport.zoom;
+
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        // A drag takes hold of whatever was under the button when it went
+        // down, and the whole drag is one thing to undo.
+        let grabbed = response
+            .drag_started_by(egui::PointerButton::Primary)
+            .then_some(input.pressed_at)
+            .flatten()
+            .and_then(|origin| self.hit(self.page_point(origin), radius));
+
+        if let Some(found) = grabbed {
+            self.commit();
+
+            if let Some(editor) = &mut self.editor {
+                editor.selected = Some(found.0);
+                editor.grabbed = Some(found);
+            }
+        }
+
+        if response.dragged_by(egui::PointerButton::Primary)
+            && let Some(pos) = response.interact_pointer_pos()
+            && let Some((selection, grab)) = self.editor.as_ref().and_then(|e| e.grabbed)
+        {
+            let to = self.page_point(pos);
+            let mirror = !input.alt;
+            let measurements = self.project.measurements.entry(self.page).or_default();
+
+            tools::move_to(measurements, selection, grab, to, mirror);
+        }
+
+        if response.drag_stopped_by(egui::PointerButton::Primary)
+            && let Some(editor) = &mut self.editor
+        {
+            editor.grabbed = None;
+        }
+
+        // A click selects what it lands on, or adds an anchor to the edge it
+        // lands on.
+        if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let point = self.page_point(pos);
+
+            let selected = match self.hit(point, radius) {
+                Some((selection, _)) => Some(selection),
+                None => self.edit(|measurements| tools::insert(measurements, point, radius)),
+            };
+
+            if let Some(editor) = &mut self.editor {
+                editor.selected = selected;
+            }
+        }
+
+        let Some(selection) = self.editor.as_ref().and_then(|editor| editor.selected) else {
+            return;
+        };
+
+        if input.delete && self.edit(|m| tools::delete(m, selection)).is_some() {
+            self.forget_selection();
+        }
+
+        if input.toggle {
+            self.edit(|m| tools::toggle(m, selection));
+        }
     }
 
     /// The panel that asks what the picked span measures in the real world.
@@ -534,7 +778,8 @@ impl App {
                         Ok(distance) => {
                             match Calibration::new(entry.from, entry.to, distance, entry.unit) {
                                 Some(calibration) => {
-                                    self.calibrations.insert(self.page, calibration);
+                                    self.commit();
+                                    self.project.calibrations.insert(self.page, calibration);
                                     keep = false;
                                     None
                                 }
@@ -578,7 +823,7 @@ impl App {
 
         // The calibrated span stays on the sheet, in page space, as the
         // evidence of what the scale was taken from.
-        if let Some(calibration) = self.calibrations.get(&self.page) {
+        if let Some(calibration) = self.project.calibrations.get(&self.page) {
             self.draw_span(&painter, calibration.from, calibration.to);
         }
 
@@ -592,11 +837,57 @@ impl App {
             _ => {}
         }
 
-        for measurement in self.measurements.get(&self.page).into_iter().flatten() {
+        for measurement in self
+            .project
+            .measurements
+            .get(&self.page)
+            .into_iter()
+            .flatten()
+        {
             self.draw_measurement(&painter, measurement);
         }
 
         self.draw_pen(&painter, cursor);
+        self.draw_editable(&painter);
+    }
+
+    /// While editing, every anchor on the page is a target, and the selected
+    /// one shows the handles that shape the curve either side of it.
+    fn draw_editable(&self, painter: &egui::Painter) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+
+        for (index, measurement) in self
+            .project
+            .measurements
+            .get(&self.page)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            for (at, anchor) in measurement.outer.anchors.iter().enumerate() {
+                let selected = editor.selected
+                    == Some(tools::Selection {
+                        measurement: index,
+                        anchor: at,
+                    });
+
+                if selected {
+                    self.draw_handles(painter, anchor);
+                }
+
+                painter.circle_filled(
+                    self.screen(anchor.pos),
+                    if selected {
+                        ANCHOR_DOT + 1.5
+                    } else {
+                        ANCHOR_DOT
+                    },
+                    if selected { SELECTED } else { OUTLINE },
+                );
+            }
+        }
     }
 
     /// A finished area: its outline, and what it encloses in real units.
@@ -611,7 +902,7 @@ impl App {
             egui::Stroke::new(1.5, measurement.colour),
         ));
 
-        let Some(calibration) = self.calibrations.get(&self.page) else {
+        let Some(calibration) = self.project.calibrations.get(&self.page) else {
             return;
         };
 

@@ -1,6 +1,8 @@
 //! What the user builds on top of a drawing: the scale of a page, and the
 //! areas measured on it.
 
+use std::collections::HashMap;
+
 use eframe::egui::Color32;
 use kurbo::{Point, Vec2};
 
@@ -155,6 +157,17 @@ pub struct Measurement {
     pub holes: Vec<SubPath>,
     pub colour: Color32,
     pub visible: bool,
+}
+
+/// Everything the user has built on the drawing, keyed by page.
+///
+/// This is the unit of undo: it is cloned whole before each committed
+/// operation. The document is small, and a stack of clones is far easier to
+/// keep correct than a set of reversible commands.
+#[derive(Clone, Default)]
+pub struct Project {
+    pub calibrations: HashMap<usize, Calibration>,
+    pub measurements: HashMap<usize, Vec<Measurement>>,
 }
 
 #[cfg(test)]
