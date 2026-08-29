@@ -63,7 +63,7 @@ const SNAP: f64 = 10.0;
 const DECIDED: f64 = 6.0;
 
 /// The ring drawn round the anchor a placement has caught.
-const SNAPPED: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
+const SNAPPED: egui::Color32 = egui::Color32::from_rgb(255, 0, 160);
 
 /// The side of the magnifier, in logical points on screen.
 const LOUPE: f32 = 150.0;
@@ -645,6 +645,16 @@ impl App {
 
             ui.separator();
             ui.label(self.hint());
+
+            // Snapping is silent when nothing is in reach, so it says whether
+            // it is even looking.
+            if matches!(self.tool, Tool::Pen | Tool::DirectSelect) {
+                ui.weak(if self.assist.snap {
+                    "· snapping"
+                } else {
+                    "· snapping off (n)"
+                });
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 match self.project.calibrations.get(&self.page) {
@@ -1614,12 +1624,22 @@ impl App {
         self.draw_pen(scene, cursor);
         self.draw_anchors(scene);
 
+        // The ring was white, which on a white drawing is nothing at all.
+        // A dark halo under a bright ring reads on paper and on the backdrop
+        // either side of the sheet.
         if let Some(caught) = self.snapped {
+            let at = scene.at(caught);
+            let radius = ANCHOR_DOT + 4.0;
+
             scene.painter.circle_stroke(
-                scene.at(caught),
-                ANCHOR_DOT + 3.0,
-                egui::Stroke::new(1.5, SNAPPED),
+                at,
+                radius,
+                egui::Stroke::new(3.0, egui::Color32::from_black_alpha(120)),
             );
+            scene
+                .painter
+                .circle_stroke(at, radius, egui::Stroke::new(1.5, SNAPPED));
+            scene.painter.circle_filled(at, 1.5, SNAPPED);
         }
     }
 
