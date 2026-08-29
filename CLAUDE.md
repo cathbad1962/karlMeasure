@@ -59,6 +59,11 @@ Eyedropper and Length, holding the layout a later, separate project is meant
 to fill in. They are labels and nothing else: no state, no tool, no code path
 reaches them, and no other code accounts for them.
 
+Shortcuts are reserved the same way. `Shift+Alt+C` is held for a format
+painter and must not be bound to anything else. No shortcut may pair Ctrl with
+`C`, `X` or `V`: the window layer turns those into clipboard events and returns
+before a key event exists, so they cannot reach this application at all.
+
 Every one of them stays out of scope **for this project** and will not be
 wired up here. They are kept in the interface deliberately, so the shape of
 the palette is settled before anything grows into it. Do not grow this

@@ -96,7 +96,7 @@ enum Tool {
     AddAnchor,
     /// `-` — taking an anchor away.
     DeleteAnchor,
-    /// Setting the page scale, from the measurement panel.
+    /// `u` — setting the page scale, once per drawing.
     Calibrate,
 }
 
@@ -249,7 +249,7 @@ impl Input {
                 delete: key(egui::Key::Delete) || key(egui::Key::Backspace),
                 undo: command && !i.modifiers.shift && key(egui::Key::Z),
                 redo: command && (key(egui::Key::Y) || (i.modifiers.shift && key(egui::Key::Z))),
-                tool: if shifted(egui::Key::C) && i.modifiers.alt {
+                tool: if plain(egui::Key::U) {
                     Some(Tool::Calibrate)
                 } else if shifted(egui::Key::C) {
                     Some(Tool::AnchorPoint)
@@ -769,7 +769,7 @@ impl App {
                             egui::Button::new("Calibrate").selected(self.tool == Tool::Calibrate);
                         if ui
                             .add_sized([width, 24.0], calibrate)
-                            .on_hover_text("Shift+Alt+C")
+                            .on_hover_text("Calibrate the page scale (u)")
                             .clicked()
                         {
                             self.take_up(Tool::Calibrate);
