@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use kurbo::{Point, Rect, Size, Vec2};
 
-use crate::doc::{Calibration, Measurement, SubPath, Unit};
+use crate::doc::{Anchor, Calibration, Measurement, SubPath, Unit};
 use crate::geom;
 use crate::pdf;
 use crate::tools::Pen;
@@ -37,6 +37,12 @@ const OUTLINE: egui::Color32 = egui::Color32::from_rgb(0, 150, 190);
 
 /// The radius of an anchor dot, in logical points on screen.
 const ANCHOR_DOT: f32 = 3.0;
+
+/// The handle bar being pulled out of an anchor.
+const HANDLE: egui::Color32 = egui::Color32::from_rgb(120, 195, 225);
+
+/// The radius of a handle's end dot, in logical points on screen.
+const HANDLE_DOT: f32 = 2.5;
 
 /// How far a painted outline may stray from the true curve, in logical points
 /// on screen. Divided by zoom to get the flattening tolerance in page units.
@@ -343,13 +349,15 @@ impl App {
         let canvas = to_kurbo_rect(canvas);
         let now = Instant::now();
 
-        let (page_up, page_down, escape, scroll, cursor) = ui.input(|i| {
+        let (page_up, page_down, escape, scroll, cursor, pressed_at, alt) = ui.input(|i| {
             (
                 i.key_pressed(egui::Key::PageUp),
                 i.key_pressed(egui::Key::PageDown),
                 i.key_pressed(egui::Key::Escape),
                 i.smooth_scroll_delta.y as f64,
                 i.pointer.hover_pos(),
+                i.pointer.press_origin(),
+                i.modifiers.alt,
             )
         });
 
@@ -412,8 +420,9 @@ impl App {
             }
         }
 
-        // Tracing an outline. Left click places a corner, right click closes
-        // the outline back to the first one, however far away it is.
+        // Tracing an outline. A left click places a corner and a left drag
+        // pulls handles out of it; a right click closes the outline back to
+        // the first anchor, however far away it is.
         if self.pen.is_some() {
             if response.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -424,6 +433,27 @@ impl App {
                 && let Some(pen) = &mut self.pen
             {
                 pen.place(self.viewport.screen_to_page(to_kurbo_point(pos)));
+            }
+
+            // The anchor belongs where the button went down, not where the
+            // drag was recognised, or the outline would shift under the hand.
+            if response.drag_started_by(egui::PointerButton::Primary)
+                && let Some(origin) = pressed_at
+                && let Some(pen) = &mut self.pen
+            {
+                pen.place(self.viewport.screen_to_page(to_kurbo_point(origin)));
+            }
+
+            if response.dragged_by(egui::PointerButton::Primary)
+                && let Some(origin) = pressed_at
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                let handle = self.viewport.screen_to_page(to_kurbo_point(pos))
+                    - self.viewport.screen_to_page(to_kurbo_point(origin));
+
+                if let Some(pen) = &mut self.pen {
+                    pen.shape(handle, !alt);
+                }
             }
 
             if response.secondary_clicked()
@@ -595,30 +625,29 @@ impl App {
         );
     }
 
-    /// The outline being traced: the corners placed so far, a rubber band to
-    /// the cursor, and a hint of the edge a right-click would close.
+    /// The outline being traced: the anchors placed so far, the curve through
+    /// them, a rubber band to the cursor, and a hint of the edge a right-click
+    /// would close. Every band is the curve it will actually become, handles
+    /// and all, rather than a straight stand-in.
     fn draw_pen(&self, painter: &egui::Painter, cursor: Option<Point>) {
         let Some(pen) = &self.pen else {
             return;
         };
         let anchors = pen.anchors();
-        let Some(first) = anchors.first() else {
+        let (Some(first), Some(last)) = (anchors.first(), anchors.last()) else {
             return;
         };
 
         let stroke = egui::Stroke::new(1.5, OUTLINE);
-        painter.add(egui::Shape::line(
-            anchors.iter().map(|a| self.screen(a.pos)).collect(),
-            stroke,
-        ));
+        self.draw_curve(painter, anchors.to_vec(), stroke);
 
         if let Some(cursor) = cursor {
-            let last = anchors.last().expect("checked above");
-            painter.line_segment([self.screen(last.pos), self.screen(cursor)], stroke);
+            self.draw_curve(painter, vec![*last, Anchor::corner(cursor)], stroke);
 
             if anchors.len() >= 2 {
-                painter.line_segment(
-                    [self.screen(cursor), self.screen(first.pos)],
+                self.draw_curve(
+                    painter,
+                    vec![Anchor::corner(cursor), *first],
                     egui::Stroke::new(1.0, OUTLINE.gamma_multiply(0.4)),
                 );
             }
@@ -626,6 +655,40 @@ impl App {
 
         for anchor in anchors {
             painter.circle_filled(self.screen(anchor.pos), ANCHOR_DOT, OUTLINE);
+        }
+
+        self.draw_handles(painter, last);
+    }
+
+    /// An open run of anchors, flattened to the accuracy the screen can show.
+    fn draw_curve(&self, painter: &egui::Painter, anchors: Vec<Anchor>, stroke: egui::Stroke) {
+        let path = SubPath {
+            anchors,
+            closed: false,
+        };
+        let outline = geom::outline(&path, FLATNESS / self.viewport.zoom);
+
+        if outline.len() > 1 {
+            painter.add(egui::Shape::line(
+                outline.iter().map(|&p| self.screen(p)).collect(),
+                stroke,
+            ));
+        }
+    }
+
+    /// The handle bar of the anchor being placed, which is what a drag is
+    /// pulling out and what the modifier breaks apart.
+    fn draw_handles(&self, painter: &egui::Painter, anchor: &Anchor) {
+        if anchor.in_handle == Vec2::ZERO && anchor.out_handle == Vec2::ZERO {
+            return;
+        }
+
+        let stroke = egui::Stroke::new(1.0, HANDLE);
+
+        for handle in [anchor.in_handle, anchor.out_handle] {
+            let end = self.screen(anchor.pos + handle);
+            painter.line_segment([self.screen(anchor.pos), end], stroke);
+            painter.circle_filled(end, HANDLE_DOT, HANDLE);
         }
     }
 

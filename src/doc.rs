@@ -101,12 +101,12 @@ impl Calibration {
     }
 }
 
-// The data model below is fixed in full. Slice 4 only places corners into it
-// and only reads the outline back, so the parts that curves, holes, naming and
-// visibility will use are not read yet.
+// The data model below is fixed in full, and parts of it are written before
+// anything reads them: an anchor's kind is set as it is placed but not acted
+// on until anchors can be edited, and a measurement's name, holes and
+// visibility wait on the slices that surface them.
 
 /// How an anchor's two handles relate to each other.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnchorKind {
     Corner,

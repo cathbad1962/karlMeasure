@@ -69,7 +69,8 @@ pub fn outline(subpath: &SubPath, tolerance: f64) -> Vec<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::Anchor;
+    use crate::doc::{Anchor, AnchorKind};
+    use kurbo::Vec2;
 
     fn corners(points: &[(f64, f64)], closed: bool) -> SubPath {
         SubPath {
@@ -111,6 +112,54 @@ mod tests {
         let triangle = corners(&[(0.0, 0.0), (60.0, 0.0), (0.0, 40.0)], true);
 
         assert!((area(&triangle) - 1_200.0).abs() < 1e-9);
+    }
+
+    /// Four smooth anchors with the standard handle length trace a circle.
+    /// Its area is pi r squared; the square through the same four anchors
+    /// would be a third short, which is what computing area from anchors
+    /// rather than from the curve would give.
+    #[test]
+    fn a_traced_circle_encloses_pi_r_squared() {
+        const KAPPA: f64 = 0.552_284_749_831;
+        let r: f64 = 50.0;
+        let pull = KAPPA * r;
+
+        let smooth = |pos: Point, in_handle: Vec2, out_handle: Vec2| Anchor {
+            pos,
+            in_handle,
+            out_handle,
+            kind: AnchorKind::Smooth,
+        };
+
+        let circle = SubPath {
+            anchors: vec![
+                smooth(
+                    Point::new(r, 0.0),
+                    Vec2::new(0.0, -pull),
+                    Vec2::new(0.0, pull),
+                ),
+                smooth(
+                    Point::new(0.0, r),
+                    Vec2::new(pull, 0.0),
+                    Vec2::new(-pull, 0.0),
+                ),
+                smooth(
+                    Point::new(-r, 0.0),
+                    Vec2::new(0.0, pull),
+                    Vec2::new(0.0, -pull),
+                ),
+                smooth(
+                    Point::new(0.0, -r),
+                    Vec2::new(-pull, 0.0),
+                    Vec2::new(pull, 0.0),
+                ),
+            ],
+            closed: true,
+        };
+
+        let expected = std::f64::consts::PI * r * r;
+        assert!((area(&circle) - expected).abs() / expected < 0.001);
+        assert!(area(&circle) > 2.0 * r * r * 1.5, "not the polygon's area");
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! The pen: placing anchors until an outline is closed.
 
-use kurbo::Point;
+use kurbo::{Point, Vec2};
 
-use crate::doc::{Anchor, SubPath};
+use crate::doc::{Anchor, AnchorKind, SubPath};
 
 /// The fewest anchors that can enclose an area.
 const ENOUGH: usize = 3;
@@ -14,8 +14,35 @@ pub struct Pen {
 }
 
 impl Pen {
+    /// Puts down an anchor where the button went down. It is a corner until a
+    /// drag pulls handles out of it.
     pub fn place(&mut self, point: Point) {
         self.anchors.push(Anchor::corner(point));
+    }
+
+    /// Pulls handles out of the anchor being placed, from the drag away from
+    /// it. While `mirror` holds, the incoming handle is kept equal and
+    /// opposite to the outgoing one; once it does not, the incoming handle is
+    /// left exactly where the mirror was broken and only the outgoing one
+    /// follows.
+    pub fn shape(&mut self, out_handle: Vec2, mirror: bool) {
+        let Some(anchor) = self.anchors.last_mut() else {
+            return;
+        };
+
+        anchor.out_handle = out_handle;
+
+        if mirror {
+            anchor.in_handle = -out_handle;
+            // Dragging back onto the anchor leaves it as sharp as it started.
+            anchor.kind = if out_handle == Vec2::ZERO {
+                AnchorKind::Corner
+            } else {
+                AnchorKind::Smooth
+            };
+        } else {
+            anchor.kind = AnchorKind::Asymmetric;
+        }
     }
 
     pub fn anchors(&self) -> &[Anchor] {
@@ -62,6 +89,42 @@ mod tests {
             pen.anchors().is_empty(),
             "the pen is ready for the next one"
         );
+    }
+
+    #[test]
+    fn dragging_mirrors_the_handles() {
+        let mut pen = Pen::default();
+        pen.place(Point::new(10.0, 10.0));
+        pen.shape(Vec2::new(4.0, 2.0), true);
+
+        let anchor = pen.anchors().last().expect("an anchor was placed");
+        assert_eq!(anchor.out_handle, Vec2::new(4.0, 2.0));
+        assert_eq!(anchor.in_handle, Vec2::new(-4.0, -2.0));
+        assert_eq!(anchor.kind, AnchorKind::Smooth);
+    }
+
+    #[test]
+    fn breaking_the_mirror_leaves_the_incoming_handle_where_it_was() {
+        let mut pen = Pen::default();
+        pen.place(Point::new(10.0, 10.0));
+        pen.shape(Vec2::new(4.0, 0.0), true);
+        pen.shape(Vec2::new(0.0, 6.0), false);
+
+        let anchor = pen.anchors().last().expect("an anchor was placed");
+        assert_eq!(anchor.in_handle, Vec2::new(-4.0, 0.0));
+        assert_eq!(anchor.out_handle, Vec2::new(0.0, 6.0));
+        assert_eq!(anchor.kind, AnchorKind::Asymmetric);
+    }
+
+    #[test]
+    fn dragging_back_onto_the_anchor_leaves_a_corner() {
+        let mut pen = Pen::default();
+        pen.place(Point::new(10.0, 10.0));
+        pen.shape(Vec2::new(4.0, 2.0), true);
+        pen.shape(Vec2::ZERO, true);
+
+        let anchor = pen.anchors().last().expect("an anchor was placed");
+        assert_eq!(anchor.kind, AnchorKind::Corner);
     }
 
     #[test]
