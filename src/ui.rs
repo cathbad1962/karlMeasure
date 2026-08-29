@@ -233,15 +233,9 @@ impl Input {
             };
             let command = !typing && i.modifiers.command;
 
-            // Ctrl+Shift+Alt+C never arrives as a key. The window layer turns
-            // any Ctrl+C into a clipboard copy and returns before the key
-            // event is made, paying no attention to the other modifiers. The
-            // copy it produces is what there is to listen for, and the
-            // modifiers held at the time are what tell it from a real one.
-            let calibrate = !typing
-                && i.modifiers.shift
-                && i.modifiers.alt
-                && i.events.contains(&egui::Event::Copy);
+            // Nothing here may hold Ctrl and a letter the clipboard claims:
+            // the window layer turns any Ctrl+C, Ctrl+X or Ctrl+V into a
+            // clipboard event and returns before a key event is made at all.
 
             // A tool's letter is the lower case one. Shift makes a different
             // binding, not the same one — `n` is Snap and `Shift+N` is not.
@@ -255,7 +249,7 @@ impl Input {
                 delete: key(egui::Key::Delete) || key(egui::Key::Backspace),
                 undo: command && !i.modifiers.shift && key(egui::Key::Z),
                 redo: command && (key(egui::Key::Y) || (i.modifiers.shift && key(egui::Key::Z))),
-                tool: if calibrate {
+                tool: if shifted(egui::Key::C) && i.modifiers.alt {
                     Some(Tool::Calibrate)
                 } else if shifted(egui::Key::C) {
                     Some(Tool::AnchorPoint)
@@ -775,7 +769,7 @@ impl App {
                             egui::Button::new("Calibrate").selected(self.tool == Tool::Calibrate);
                         if ui
                             .add_sized([width, 24.0], calibrate)
-                            .on_hover_text("Ctrl+Shift+Alt+C")
+                            .on_hover_text("Shift+Alt+C")
                             .clicked()
                         {
                             self.take_up(Tool::Calibrate);
