@@ -72,8 +72,11 @@ to build behind.
 - **Single binary crate.** Modules: `pdf`, `viewport`, `geom`, `tools`, `doc`,
   `ui`. Do not add a module without asking. Do not split into a workspace.
 - **Fixed dependency list:** `eframe`/`egui` (wgpu backend), `pdfium-render`,
-  `kurbo`, `serde`, `serde_json`, `rfd`, `csv`. **No new dependency without
-  asking first**, including dev-dependencies.
+  `kurbo`, `i_overlay`, `serde`, `serde_json`, `rfd`, `csv`. **No new
+  dependency without asking first**, including dev-dependencies. `i_overlay`
+  was added at slice 8 for one job only: the area a hole and its outline have
+  in common. Boolean geometry is a well-known source of quiet wrongness and
+  this is a measuring tool, so it is not hand-rolled.
 - **All geometry is stored in PDF page space (points).** Never store screen
   pixels. Screen position is always derived:
   `screen = page * viewport.zoom + viewport.pan`.
@@ -92,6 +95,12 @@ to build behind.
   order. Revisit static linking at slice 10 if a single-file binary is wanted.
 - **Areas are computed analytically** via `kurbo`'s signed area. Do not flatten
   curves to compute area; flattening is for rendering and hit-testing only.
+  One exception, decided at slice 8: a hole is only allowed to take off the
+  area it actually covers, and clipping it to its outline needs boolean
+  geometry, which needs flattened outlines. A hole lying wholly inside its
+  outline — the ordinary case — still subtracts its exact analytic area; only
+  one that overhangs is measured from the clipped polygon, at a flattening
+  tolerance far below anything a drawing carries.
 - **Holes are subpaths with opposite winding.** Signed areas sum. No
   special-casing.
 

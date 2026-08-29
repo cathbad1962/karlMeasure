@@ -175,6 +175,16 @@ impl Measurement {
         }
     }
 
+    /// Moves the whole measurement, outline and holes together. Handles are
+    /// held relative to their anchor, so only the anchors move.
+    pub fn translate(&mut self, by: Vec2) {
+        for subpath in std::iter::once(&mut self.outer).chain(&mut self.holes) {
+            for anchor in &mut subpath.anchors {
+                anchor.pos += by;
+            }
+        }
+    }
+
     /// Every outline in turn, outer first, each with the way to address it.
     pub fn outlines(&self) -> impl Iterator<Item = (Outline, &SubPath)> {
         std::iter::once((Outline::Outer, &self.outer)).chain(

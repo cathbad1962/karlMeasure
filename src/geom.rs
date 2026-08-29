@@ -1,6 +1,9 @@
 //! Turning stored anchors into a curve, measuring what it encloses, and
 //! reshaping it.
 
+use i_overlay::core::fill_rule::FillRule;
+use i_overlay::core::overlay_rule::OverlayRule;
+use i_overlay::float::single::SingleFloatOverlay;
 use kurbo::{BezPath, CubicBez, ParamCurve, ParamCurveNearest, PathEl, Point, Shape, Vec2};
 
 use crate::doc::{Anchor, AnchorKind, Measurement, SubPath};
@@ -52,14 +55,81 @@ pub fn signed_area(subpath: &SubPath) -> f64 {
     bez_path(subpath).area()
 }
 
-/// What a measurement covers: its outline, less the holes punched in it.
-///
-/// Holes are wound against the outline, so their signed areas cancel part of
-/// it. Nothing here has to know which subpath is a hole; the sum does it.
-pub fn measurement_area(measurement: &Measurement) -> f64 {
-    let holes: f64 = measurement.holes.iter().map(signed_area).sum();
+/// How finely outlines are flattened before they are clipped against one
+/// another, in page points. Well below the precision any drawing carries.
+const CLIP_FLATNESS: f64 = 0.01;
 
-    (signed_area(&measurement.outer) + holes).abs()
+/// How close a clipped hole has to come to its own area to be treated as
+/// lying wholly inside its outline, as a proportion.
+const WHOLLY_INSIDE: f64 = 1e-6;
+
+/// What a measurement covers: its outline, less what the holes take off it.
+///
+/// A hole only takes off the area it actually covers. One lying wholly inside
+/// its outline takes off exactly its own area, computed analytically; one that
+/// overhangs takes off the part they have in common, which needs the two
+/// outlines clipped against each other.
+pub fn measurement_area(measurement: &Measurement) -> f64 {
+    let outer = signed_area(&measurement.outer).abs();
+
+    let taken: f64 = measurement
+        .holes
+        .iter()
+        .map(|hole| overlap(&measurement.outer, hole))
+        .sum();
+
+    (outer - taken).max(0.0)
+}
+
+/// The area two closed outlines have in common, in square page points.
+fn overlap(outer: &SubPath, hole: &SubPath) -> f64 {
+    let alone = signed_area(hole).abs();
+    if alone == 0.0 {
+        return 0.0;
+    }
+
+    let subject = vec![contour(outer)];
+    let clip = vec![contour(hole)];
+    let common = subject.overlay(&clip, OverlayRule::Intersect, FillRule::NonZero);
+
+    let clipped: f64 = common
+        .iter()
+        .flatten()
+        .map(|contour| shoelace(contour))
+        .sum::<f64>()
+        .abs();
+
+    // Flattening cost the curve a little of its exactness. Where the hole is
+    // wholly inside, which is the ordinary case, the exact figure is known
+    // and is the one to use.
+    if (clipped - alone).abs() <= alone * WHOLLY_INSIDE {
+        alone
+    } else {
+        clipped
+    }
+}
+
+/// A closed outline as the ring of points the clipper works in.
+fn contour(subpath: &SubPath) -> Vec<[f64; 2]> {
+    outline(subpath, CLIP_FLATNESS)
+        .iter()
+        .map(|point| [point.x, point.y])
+        .collect()
+}
+
+/// The signed area of a ring of points.
+fn shoelace(contour: &[[f64; 2]]) -> f64 {
+    let mut twice = 0.0;
+
+    for pair in contour.windows(2) {
+        twice += pair[0][0] * pair[1][1] - pair[1][0] * pair[0][1];
+    }
+
+    if let (Some(last), Some(first)) = (contour.last(), contour.first()) {
+        twice += last[0] * first[1] - first[0] * last[1];
+    }
+
+    twice / 2.0
 }
 
 /// The same subpath traced the other way round: the anchors in reverse, each
@@ -384,6 +454,70 @@ mod tests {
 
         assert!((measurement_area(&one) - measurement_area(&other)).abs() < 1e-9);
         assert!((measurement_area(&one) - 9_600.0).abs() < 1e-9);
+    }
+
+    /// A hole hanging over the edge only takes off the part that is inside.
+    #[test]
+    fn a_hole_takes_off_only_what_it_covers() {
+        let outer = corners(
+            &[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
+            true,
+        );
+        // Half in, half out: 20 wide, straddling the right-hand edge.
+        let straddling = corners(
+            &[(90.0, 40.0), (110.0, 40.0), (110.0, 60.0), (90.0, 60.0)],
+            true,
+        );
+
+        let measured = measurement(outer.clone(), vec![as_hole(&outer, straddling)]);
+
+        // 400 square units of hole, of which 200 lie inside.
+        assert!((measurement_area(&measured) - 9_800.0).abs() < 1e-6);
+    }
+
+    /// A hole swallowing the whole outline leaves nothing, not less than
+    /// nothing.
+    #[test]
+    fn a_hole_cannot_take_off_more_than_there_is() {
+        let outer = corners(
+            &[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
+            true,
+        );
+        let swallowing = corners(
+            &[
+                (-50.0, -50.0),
+                (150.0, -50.0),
+                (150.0, 150.0),
+                (-50.0, 150.0),
+            ],
+            true,
+        );
+
+        let measured = measurement(outer.clone(), vec![as_hole(&outer, swallowing)]);
+
+        assert!(measurement_area(&measured).abs() < 1e-6);
+    }
+
+    /// A hole that misses its outline altogether takes off nothing.
+    #[test]
+    fn a_hole_beside_the_outline_takes_off_nothing() {
+        let outer = corners(
+            &[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
+            true,
+        );
+        let elsewhere = corners(
+            &[
+                (200.0, 200.0),
+                (220.0, 200.0),
+                (220.0, 220.0),
+                (200.0, 220.0),
+            ],
+            true,
+        );
+
+        let measured = measurement(outer.clone(), vec![as_hole(&outer, elsewhere)]);
+
+        assert!((measurement_area(&measured) - 10_000.0).abs() < 1e-6);
     }
 
     #[test]

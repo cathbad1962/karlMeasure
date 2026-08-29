@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 eframe = "0.36"
+i_overlay = "8.1.0"
 kurbo = "0.13.1"
 pdfium-render = { version = "0.9", default-features = false, features = [
     "pdfium_latest",

@@ -64,8 +64,8 @@ const SNAPPED: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
 /// The side of the magnifier, in logical points on screen.
 const LOUPE: f32 = 150.0;
 
-/// How far the magnifier sits from the cursor, so it never covers the target.
-const LOUPE_OFFSET: f32 = 22.0;
+/// How far the magnifier sits from the corner of the canvas.
+const LOUPE_MARGIN: f32 = 10.0;
 
 /// How much the magnifier magnifies, over the current zoom.
 const MAGNIFY: f64 = 4.0;
@@ -122,6 +122,43 @@ impl Default for Assist {
     }
 }
 
+/// Somewhere a drawing is being painted, and the transform that puts page
+/// space onto it. The sheet and the magnifier are the same picture through
+/// different viewports, so everything that draws takes one of these.
+struct Scene<'a> {
+    painter: &'a egui::Painter,
+    view: Viewport,
+    /// Captions belong on the sheet; inside the magnifier they would cover the
+    /// very detail being looked at.
+    labels: bool,
+}
+
+/// Whose anchors are worth showing.
+enum Showing {
+    Every,
+    JustOne(usize),
+}
+
+impl Showing {
+    fn includes(&self, measurement: usize) -> bool {
+        match self {
+            Self::Every => true,
+            Self::JustOne(index) => *index == measurement,
+        }
+    }
+}
+
+impl Scene<'_> {
+    fn at(&self, page: Point) -> egui::Pos2 {
+        to_egui_pos(self.view.page_to_screen(page))
+    }
+
+    /// How far a painted outline may stray from the curve, in page units.
+    fn flatness(&self) -> f64 {
+        FLATNESS / self.view.zoom
+    }
+}
+
 /// The magnified patch of drawing under the cursor.
 struct Loupe {
     texture: egui::TextureHandle,
@@ -156,6 +193,7 @@ struct Input {
     /// The tool a key asked for, if one did.
     tool: Option<Tool>,
     snap: bool,
+    hole: bool,
     scroll: f64,
     cursor: Option<egui::Pos2>,
     /// Where the button went down, while one is held.
@@ -205,6 +243,7 @@ impl Input {
                     None
                 },
                 snap: plain(egui::Key::N),
+                hole: plain(egui::Key::H),
                 scroll: i.smooth_scroll_delta.y as f64,
                 cursor: i.pointer.hover_pos(),
                 pressed_at: i.pointer.press_origin(),
@@ -264,6 +303,9 @@ pub struct App {
     editor: Option<Editor>,
     /// The measurement selected as a whole, by the selection tool.
     selected_measurement: Option<usize>,
+    /// A measurement being dragged bodily: which one, how it was before the
+    /// drag began, and the page point the drag started from.
+    moving: Option<(usize, Box<Measurement>, Point)>,
     /// The magnified patch under the cursor, and when to re-render it.
     loupe: Option<Loupe>,
     loupe_settle: Option<Instant>,
@@ -594,7 +636,7 @@ impl App {
             }
             Tool::Pen if self.pen_target.is_some() => "Tracing a hole; right-click to close",
             Tool::Pen => "Click to place corners, drag to curve, right-click to close",
-            Tool::Select => "Click an area to select it; Delete removes it",
+            Tool::Select => "Click an area to select it, drag to move it, h for a hole in it",
             Tool::DirectSelect => "Drag an anchor or a handle; Alt breaks a smooth pair",
             Tool::AnchorPoint => "Click an anchor to flip it between a corner and a curve",
             Tool::AddAnchor => "Click an edge to add an anchor to it",
@@ -755,6 +797,15 @@ impl App {
         }
         if input.snap {
             self.assist.snap = !self.assist.snap;
+        }
+
+        // A hole goes into whichever measurement is in hand, however it came
+        // to be in hand.
+        if input.hole
+            && let Some(index) = self.current_measurement()
+        {
+            self.take_up(Tool::Pen);
+            self.pen_target = Some(index);
         }
 
         if input.page_up && self.page > 0 {
@@ -1215,8 +1266,39 @@ impl App {
         }
     }
 
+    /// The measurement being worked on, whether it was taken hold of whole or
+    /// by one of its anchors.
+    fn current_measurement(&self) -> Option<usize> {
+        self.selected_measurement.or_else(|| {
+            self.editor
+                .as_ref()?
+                .selected
+                .map(|selection| selection.measurement)
+        })
+    }
+
+    /// What lies under a page point, taking the whole measurement rather than
+    /// any part of it: inside its outline, or close enough to the edge.
+    fn measurement_at(&self, point: Point) -> Option<usize> {
+        let reach = HIT / self.viewport.zoom;
+
+        self.project
+            .measurements
+            .get(&self.page)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, measurement)| measurement.visible)
+            .find(|(_, measurement)| {
+                geom::bez_path(&measurement.outer).contains(point)
+                    || geom::nearest(&measurement.outer, point)
+                        .is_some_and(|found| found.distance <= reach)
+            })
+            .map(|(index, _)| index)
+    }
+
     /// Selecting a whole measurement: click its outline, or anywhere inside
-    /// it. Delete takes the selected one off the page.
+    /// it. Dragging moves it bodily; Delete takes it off the page.
     fn select_measurement(&mut self, ui: &egui::Ui, response: &egui::Response, input: &Input) {
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
@@ -1225,25 +1307,57 @@ impl App {
         if response.clicked()
             && let Some(pos) = response.interact_pointer_pos()
         {
-            let point = self.page_point(pos);
-            let reach = HIT / self.viewport.zoom;
+            self.selected_measurement = self.measurement_at(self.page_point(pos));
+        }
 
-            self.selected_measurement = self
-                .project
-                .measurements
-                .get(&self.page)
-                .into_iter()
-                .flatten()
-                .enumerate()
-                .filter(|(_, measurement)| measurement.visible)
-                .find(|(_, measurement)| {
-                    let path = geom::bez_path(&measurement.outer);
+        // A drag takes hold of whatever it started on, and moves it as one
+        // thing: outline, holes and all.
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(origin) = input.pressed_at
+        {
+            let from = self.page_point(origin);
 
-                    path.contains(point)
-                        || geom::nearest(&measurement.outer, point)
-                            .is_some_and(|found| found.distance <= reach)
-                })
-                .map(|(index, _)| index);
+            if let Some(index) = self.measurement_at(from) {
+                self.commit();
+                self.selected_measurement = Some(index);
+
+                let held = self
+                    .project
+                    .measurements
+                    .get(&self.page)
+                    .and_then(|measurements| measurements.get(index))
+                    .cloned();
+
+                self.moving = held.map(|measurement| (index, Box::new(measurement), from));
+            }
+        }
+
+        if response.dragged_by(egui::PointerButton::Primary)
+            && let Some(pos) = response.interact_pointer_pos()
+            && let Some((index, held, from)) = &self.moving
+        {
+            let (index, from) = (*index, *from);
+            let to = self.page_point(pos);
+            let to = if input.shift {
+                geom::orthogonal(from, to)
+            } else {
+                to
+            };
+
+            // Moved from where it was rather than by this frame's delta, so a
+            // constrained drag cannot creep off the line it is held to.
+            let mut moved = held.as_ref().clone();
+            moved.translate(to - from);
+
+            if let Some(measurements) = self.project.measurements.get_mut(&self.page)
+                && let Some(target) = measurements.get_mut(index)
+            {
+                *target = moved;
+            }
+        }
+
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            self.moving = None;
         }
 
         if input.delete
@@ -1361,19 +1475,35 @@ impl App {
             egui::StrokeKind::Outside,
         );
 
+        self.draw_overlay(
+            &Scene {
+                painter: &painter,
+                view: self.viewport,
+                labels: true,
+            },
+            cursor,
+        );
+
+        self.draw_loupe(&painter, canvas, cursor);
+    }
+
+    /// Everything the user has put on the drawing, painted through whichever
+    /// viewport the scene carries. The sheet and the magnifier are the same
+    /// picture at two magnifications.
+    fn draw_overlay(&self, scene: &Scene, cursor: Option<Point>) {
         // The calibrated span stays on the sheet, in page space, as the
         // evidence of what the scale was taken from.
         if let Some(calibration) = self.project.calibrations.get(&self.page) {
-            self.draw_span(&painter, calibration.from, calibration.to);
+            self.draw_span(scene, calibration.from, calibration.to);
         }
 
         match (&self.pick, &self.entry) {
             (Some(Pick::Second { from }), _) => {
                 if let Some(cursor) = cursor {
-                    self.draw_span(&painter, *from, cursor);
+                    self.draw_span(scene, *from, cursor);
                 }
             }
-            (_, Some(entry)) => self.draw_span(&painter, entry.from, entry.to),
+            (_, Some(entry)) => self.draw_span(scene, entry.from, entry.to),
             _ => {}
         }
 
@@ -1386,21 +1516,19 @@ impl App {
             .enumerate()
         {
             let selected = self.tool == Tool::Select && self.selected_measurement == Some(index);
-            self.draw_measurement(&painter, measurement, selected);
+            self.draw_measurement(scene, measurement, selected);
         }
 
-        self.draw_pen(&painter, cursor);
-        self.draw_editable(&painter);
+        self.draw_pen(scene, cursor);
+        self.draw_anchors(scene);
 
         if let Some(caught) = self.snapped {
-            painter.circle_stroke(
-                self.screen(caught),
+            scene.painter.circle_stroke(
+                scene.at(caught),
                 ANCHOR_DOT + 3.0,
                 egui::Stroke::new(1.5, SNAPPED),
             );
         }
-
-        self.draw_loupe(&painter, canvas, cursor);
     }
 
     /// Whether the magnifier is worth showing: while something is being
@@ -1417,7 +1545,7 @@ impl App {
                 .editor
                 .as_ref()
                 .is_some_and(|editor| editor.grabbed.is_some()),
-            Tool::Select => false,
+            Tool::Select => self.moving.is_some(),
         }
     }
 
@@ -1431,18 +1559,17 @@ impl App {
             return;
         }
 
-        let at = self.screen(cursor);
-        let mut rect = egui::Rect::from_min_size(
-            egui::pos2(at.x + LOUPE_OFFSET, at.y - LOUPE_OFFSET - LOUPE),
+        // Pinned to the top right of the canvas. It followed the cursor to
+        // begin with, which made it jump about exactly when a steady hand was
+        // wanted.
+        let bounds = to_egui_rect(canvas);
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(
+                bounds.max.x - LOUPE - LOUPE_MARGIN,
+                bounds.min.y + LOUPE_MARGIN,
+            ),
             egui::vec2(LOUPE, LOUPE),
         );
-
-        // Keep it on the canvas when the cursor is near an edge.
-        let bounds = to_egui_rect(canvas);
-        rect = rect.translate(egui::vec2(
-            (bounds.max.x - rect.max.x).min(0.0) - (bounds.min.x - rect.min.x).min(0.0),
-            (bounds.max.y - rect.max.y).min(0.0) - (bounds.min.y - rect.min.y).min(0.0),
-        ));
 
         // A viewport of its own, magnifying about the point under the cursor.
         let zoom = self.viewport.zoom * MAGNIFY;
@@ -1459,6 +1586,18 @@ impl App {
             to_egui_rect(inside.page_rect_to_screen(loupe.region)),
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             egui::Color32::WHITE,
+        );
+
+        // The same overlay as the sheet, at four times the size: the point of
+        // the magnifier is to place an anchor against the drawing, so the
+        // anchors have to be in it.
+        self.draw_overlay(
+            &Scene {
+                painter: &painter,
+                view: inside,
+                labels: false,
+            },
+            Some(cursor),
         );
 
         // The crosshair marks the exact point, which is the whole purpose.
@@ -1541,12 +1680,20 @@ impl App {
         }
     }
 
-    /// While editing, every anchor on the page is a target, and the selected
-    /// one shows the handles that shape the curve either side of it.
-    fn draw_editable(&self, painter: &egui::Painter) {
-        let Some(editor) = &self.editor else {
-            return;
+    /// The anchors a tool can reach: every one on the page while an anchor
+    /// tool is in hand, or just the selected shape's while the selection tool
+    /// is. The selected anchor also shows the handles either side of it.
+    fn draw_anchors(&self, scene: &Scene) {
+        let showing = match self.tool {
+            tool if tool.edits_anchors() => Showing::Every,
+            Tool::Select => match self.selected_measurement {
+                Some(index) => Showing::JustOne(index),
+                None => return,
+            },
+            _ => return,
         };
+
+        let selected = self.editor.as_ref().and_then(|editor| editor.selected);
 
         for (index, measurement) in self
             .project
@@ -1556,31 +1703,31 @@ impl App {
             .flatten()
             .enumerate()
         {
-            if !measurement.visible {
+            if !measurement.visible || !showing.includes(index) {
                 continue;
             }
 
             for (outline, subpath) in measurement.outlines() {
                 for (at, anchor) in subpath.anchors.iter().enumerate() {
-                    let selected = editor.selected
+                    let is_selected = selected
                         == Some(tools::Selection {
                             measurement: index,
                             outline,
                             anchor: at,
                         });
 
-                    if selected {
-                        self.draw_handles(painter, anchor);
+                    if is_selected {
+                        self.draw_handles(scene, anchor);
                     }
 
-                    painter.circle_filled(
-                        self.screen(anchor.pos),
-                        if selected {
+                    scene.painter.circle_filled(
+                        scene.at(anchor.pos),
+                        if is_selected {
                             ANCHOR_DOT + 1.5
                         } else {
                             ANCHOR_DOT
                         },
-                        if selected { SELECTED } else { OUTLINE },
+                        if is_selected { SELECTED } else { OUTLINE },
                     );
                 }
             }
@@ -1589,7 +1736,7 @@ impl App {
 
     /// A finished area: its outline, the holes in it, and what it covers in
     /// real units once they are taken off.
-    fn draw_measurement(&self, painter: &egui::Painter, measurement: &Measurement, selected: bool) {
+    fn draw_measurement(&self, scene: &Scene, measurement: &Measurement, selected: bool) {
         if !measurement.visible {
             return;
         }
@@ -1597,16 +1744,15 @@ impl App {
         // The selected measurement is drawn heavier, which is all the
         // selection tool has to say about it.
         let stroke = egui::Stroke::new(if selected { 3.0 } else { 1.5 }, measurement.colour);
-        let tolerance = FLATNESS / self.viewport.zoom;
 
-        for subpath in std::iter::once(&measurement.outer).chain(&measurement.holes) {
-            let outline = geom::outline(subpath, tolerance);
+        for (_, subpath) in measurement.outlines() {
+            let outline = geom::outline(subpath, scene.flatness());
             if outline.len() < 2 {
                 continue;
             }
 
-            painter.add(egui::Shape::closed_line(
-                outline.iter().map(|&p| self.screen(p)).collect(),
+            scene.painter.add(egui::Shape::closed_line(
+                outline.iter().map(|&p| scene.at(p)).collect(),
                 stroke,
             ));
         }
@@ -1621,7 +1767,7 @@ impl App {
         );
 
         self.draw_label(
-            painter,
+            scene,
             geom::centre(&measurement.outer),
             &format!("{} · {area}", measurement.name),
         );
@@ -1631,7 +1777,7 @@ impl App {
     /// them, a rubber band to the cursor, and a hint of the edge a right-click
     /// would close. Every band is the curve it will actually become, handles
     /// and all, rather than a straight stand-in.
-    fn draw_pen(&self, painter: &egui::Painter, cursor: Option<Point>) {
+    fn draw_pen(&self, scene: &Scene, cursor: Option<Point>) {
         let Some(pen) = &self.pen else {
             return;
         };
@@ -1641,14 +1787,14 @@ impl App {
         };
 
         let stroke = egui::Stroke::new(1.5, OUTLINE);
-        self.draw_curve(painter, anchors.to_vec(), stroke);
+        self.draw_curve(scene, anchors.to_vec(), stroke);
 
         if let Some(cursor) = cursor {
-            self.draw_curve(painter, vec![*last, Anchor::corner(cursor)], stroke);
+            self.draw_curve(scene, vec![*last, Anchor::corner(cursor)], stroke);
 
             if anchors.len() >= 2 {
                 self.draw_curve(
-                    painter,
+                    scene,
                     vec![Anchor::corner(cursor), *first],
                     egui::Stroke::new(1.0, OUTLINE.gamma_multiply(0.4)),
                 );
@@ -1656,31 +1802,33 @@ impl App {
         }
 
         for anchor in anchors {
-            painter.circle_filled(self.screen(anchor.pos), ANCHOR_DOT, OUTLINE);
+            scene
+                .painter
+                .circle_filled(scene.at(anchor.pos), ANCHOR_DOT, OUTLINE);
         }
 
-        self.draw_handles(painter, last);
+        self.draw_handles(scene, last);
     }
 
     /// An open run of anchors, flattened to the accuracy the screen can show.
-    fn draw_curve(&self, painter: &egui::Painter, anchors: Vec<Anchor>, stroke: egui::Stroke) {
+    fn draw_curve(&self, scene: &Scene, anchors: Vec<Anchor>, stroke: egui::Stroke) {
         let path = SubPath {
             anchors,
             closed: false,
         };
-        let outline = geom::outline(&path, FLATNESS / self.viewport.zoom);
+        let outline = geom::outline(&path, scene.flatness());
 
         if outline.len() > 1 {
-            painter.add(egui::Shape::line(
-                outline.iter().map(|&p| self.screen(p)).collect(),
+            scene.painter.add(egui::Shape::line(
+                outline.iter().map(|&p| scene.at(p)).collect(),
                 stroke,
             ));
         }
     }
 
-    /// The handle bar of the anchor being placed, which is what a drag is
-    /// pulling out and what the modifier breaks apart.
-    fn draw_handles(&self, painter: &egui::Painter, anchor: &Anchor) {
+    /// The handle bar of an anchor, which is what a drag pulls out and what
+    /// the modifier breaks apart.
+    fn draw_handles(&self, scene: &Scene, anchor: &Anchor) {
         if anchor.in_handle == Vec2::ZERO && anchor.out_handle == Vec2::ZERO {
             return;
         }
@@ -1688,36 +1836,42 @@ impl App {
         let stroke = egui::Stroke::new(1.0, HANDLE);
 
         for handle in [anchor.in_handle, anchor.out_handle] {
-            let end = self.screen(anchor.pos + handle);
-            painter.line_segment([self.screen(anchor.pos), end], stroke);
-            painter.circle_filled(end, HANDLE_DOT, HANDLE);
+            let end = scene.at(anchor.pos + handle);
+            scene
+                .painter
+                .line_segment([scene.at(anchor.pos), end], stroke);
+            scene.painter.circle_filled(end, HANDLE_DOT, HANDLE);
         }
     }
 
     /// A readable caption on the drawing, sized in logical points so it stays
     /// legible at every zoom.
-    fn draw_label(&self, painter: &egui::Painter, at: Point, text: &str) {
-        let galley = painter.layout_no_wrap(
+    fn draw_label(&self, scene: &Scene, at: Point, text: &str) {
+        if !scene.labels {
+            return;
+        }
+
+        let galley = scene.painter.layout_no_wrap(
             text.to_owned(),
             egui::FontId::proportional(12.0),
             egui::Color32::WHITE,
         );
-        let rect = egui::Align2::CENTER_CENTER.anchor_size(self.screen(at), galley.size());
+        let rect = egui::Align2::CENTER_CENTER.anchor_size(scene.at(at), galley.size());
 
-        painter.rect_filled(rect.expand(4.0), 3, egui::Color32::from_black_alpha(190));
-        painter.galley(rect.min, galley, egui::Color32::WHITE);
+        scene
+            .painter
+            .rect_filled(rect.expand(4.0), 3, egui::Color32::from_black_alpha(190));
+        scene.painter.galley(rect.min, galley, egui::Color32::WHITE);
     }
 
-    fn screen(&self, page: Point) -> egui::Pos2 {
-        to_egui_pos(self.viewport.page_to_screen(page))
-    }
-
-    fn draw_span(&self, painter: &egui::Painter, from: Point, to: Point) {
-        let a = self.viewport.page_to_screen(from);
-        let b = self.viewport.page_to_screen(to);
+    fn draw_span(&self, scene: &Scene, from: Point, to: Point) {
+        let a = scene.view.page_to_screen(from);
+        let b = scene.view.page_to_screen(to);
         let stroke = egui::Stroke::new(1.5, SPAN);
 
-        painter.line_segment([to_egui_pos(a), to_egui_pos(b)], stroke);
+        scene
+            .painter
+            .line_segment([to_egui_pos(a), to_egui_pos(b)], stroke);
 
         // End ticks are a fixed length on screen, so they stay readable
         // however far the drawing is zoomed.
@@ -1726,7 +1880,7 @@ impl App {
         if length > f64::EPSILON {
             let across = Vec2::new(-along.y, along.x) / length * TICK;
             for end in [a, b] {
-                painter.line_segment(
+                scene.painter.line_segment(
                     [to_egui_pos(end - across), to_egui_pos(end + across)],
                     stroke,
                 );
