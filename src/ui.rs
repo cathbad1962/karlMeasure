@@ -65,6 +65,10 @@ const DECIDED: f64 = 6.0;
 /// The ring drawn round the anchor a placement has caught.
 const SNAPPED: egui::Color32 = egui::Color32::from_rgb(255, 0, 160);
 
+/// The width of the column beside the tool strip, matching the measurements
+/// panel on the other side so the window sits evenly.
+const GROUPS_WIDTH: f32 = 320.0;
+
 /// The side of the magnifier, in logical points on screen.
 const LOUPE: f32 = 150.0;
 
@@ -313,6 +317,9 @@ pub struct App {
     tool: Tool,
     /// The precision aids, on or off.
     assist: Assist,
+    /// Whether the column beside the tool strip is folded away. Held the
+    /// negative way round so that starting open needs no ceremony.
+    groups_hidden: bool,
     pick: Option<Pick>,
     entry: Option<Entry>,
     /// Present while the area tool is armed.
@@ -763,19 +770,43 @@ impl App {
                     }
                     ui.add_space(2.0);
                 }
+
+                // The panel beside this one folds away against the edge of
+                // the window, and this is what brings it back.
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                let (arrow, name) = if self.groups_hidden {
+                    ("»", "Open the panel")
+                } else {
+                    ("«", "Fold the panel away")
+                };
+
+                if ui
+                    .add_sized([32.0, 28.0], egui::Button::new(arrow))
+                    .on_hover_text(name)
+                    .clicked()
+                {
+                    self.groups_hidden = !self.groups_hidden;
+                }
             });
     }
 
     /// The measurement tools, grouped and collapsible.
-    fn tool_groups(&mut self, _ui: &mut egui::Ui) {
+    fn tool_groups(&mut self, ui: &mut egui::Ui) {
+        if self.groups_hidden {
+            return;
+        }
+
         // Deliberately empty. The column is here to hold the space for the
         // groups of tools a later project will fill it with; nothing this
         // project has belongs in it. Everything that was here has moved: the
         // tools to the strip, and Length to a reserved shortcut in CLAUDE.md
         // rather than a button that does nothing.
         egui::Panel::left("tool_groups")
-            .default_size(170.0)
-            .show(_ui, |_ui| {});
+            .default_size(GROUPS_WIDTH)
+            .show(ui, |_ui| {});
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
