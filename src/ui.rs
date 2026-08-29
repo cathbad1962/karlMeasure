@@ -58,6 +58,10 @@ const FLATNESS: f64 = 0.25;
 /// in logical points on screen.
 const SNAP: f64 = 10.0;
 
+/// How far a constrained drag has to travel, in logical points on screen,
+/// before the axis it is held to is settled for the rest of the drag.
+const DECIDED: f64 = 6.0;
+
 /// The ring drawn round the anchor a placement has caught.
 const SNAPPED: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
 
@@ -225,7 +229,12 @@ impl Input {
                 delete: key(egui::Key::Delete) || key(egui::Key::Backspace),
                 undo: command && !i.modifiers.shift && key(egui::Key::Z),
                 redo: command && (key(egui::Key::Y) || (i.modifiers.shift && key(egui::Key::Z))),
-                tool: if shifted(egui::Key::C) && i.modifiers.alt {
+                tool: if !typing
+                    && i.modifiers.command
+                    && i.modifiers.shift
+                    && i.modifiers.alt
+                    && i.key_pressed(egui::Key::C)
+                {
                     Some(Tool::Calibrate)
                 } else if shifted(egui::Key::C) {
                     Some(Tool::AnchorPoint)
@@ -306,6 +315,8 @@ pub struct App {
     /// A measurement being dragged bodily: which one, how it was before the
     /// drag began, and the page point the drag started from.
     moving: Option<(usize, Box<Measurement>, Point)>,
+    /// The axis a constrained drag has settled on, held until it ends.
+    constraint: Option<geom::Axis>,
     /// The magnified patch under the cursor, and when to re-render it.
     loupe: Option<Loupe>,
     loupe_settle: Option<Instant>,
@@ -501,6 +512,10 @@ impl App {
             // adding it, however it was traced.
             let hole = geom::as_hole(&measurement.outer, outline);
             measurement.holes.push(hole);
+
+            // One press of `h`, one hole. The pen goes back to drawing new
+            // areas rather than quietly filling the same one with holes.
+            self.pen_target = None;
             return;
         }
 
@@ -740,17 +755,24 @@ impl App {
                             egui::Button::new("Calibrate").selected(self.tool == Tool::Calibrate);
                         if ui
                             .add_sized([width, 24.0], calibrate)
-                            .on_hover_text("Shift+Alt+C")
+                            .on_hover_text("Ctrl+Shift+Alt+C")
                             .clicked()
                         {
                             self.take_up(Tool::Calibrate);
                         }
 
-                        // Area is the only kind of measurement there is, so it
-                        // is always the kind in effect. When there is a second
-                        // kind, this is where the choice will be made.
-                        ui.add_sized([width, 24.0], egui::Button::new("Area").selected(true))
-                            .on_hover_text("Draw one with the Pen");
+                        // Area is the only kind of measurement there is, so
+                        // asking for one simply hands over the tool that draws
+                        // it. When there is a second kind, this is where the
+                        // choice between them will be made.
+                        let area = egui::Button::new("Area").selected(self.tool == Tool::Pen);
+                        if ui
+                            .add_sized([width, 24.0], area)
+                            .on_hover_text("Measure an area — takes up the Pen (p)")
+                            .clicked()
+                        {
+                            self.take_up(Tool::Pen);
+                        }
 
                         ui.add_enabled_ui(false, |ui| {
                             ui.add_sized([width, 24.0], egui::Button::new("Length"))
@@ -1108,9 +1130,30 @@ impl App {
         targets
     }
 
-    /// Where a placement actually lands. Shift holds it square to `from`;
-    /// otherwise it is pulled onto a nearby anchor, if snapping is on and one
-    /// is in reach. The two would fight each other, so Shift wins.
+    /// Holds a movement to one axis while Shift is down.
+    ///
+    /// The axis is settled once the movement is decisively along one of them
+    /// and then kept, rather than decided afresh every frame: re-deciding lets
+    /// a wobbling hand flip the constraint, and a tie goes to the horizontal.
+    fn constrain(&mut self, from: Point, point: Point, shift: bool) -> Point {
+        if !shift {
+            self.constraint = None;
+            return point;
+        }
+
+        let decisive = (point - from).hypot() * self.viewport.zoom >= DECIDED;
+        let axis = match self.constraint {
+            Some(axis) => axis,
+            None if decisive => *self.constraint.insert(geom::Axis::of(from, point)),
+            None => geom::Axis::of(from, point),
+        };
+
+        axis.hold(from, point)
+    }
+
+    /// Where a placement actually lands. Shift holds it to one axis from
+    /// `from`; otherwise it is pulled onto a nearby anchor, if snapping is on
+    /// and one is in reach. The two would fight each other, so Shift wins.
     fn aim(
         &mut self,
         point: Point,
@@ -1121,8 +1164,9 @@ impl App {
         if input.shift
             && let Some(from) = from
         {
-            return geom::orthogonal(from, point);
+            return self.constrain(from, point, true);
         }
+        self.constraint = None;
 
         if self.assist.snap
             && let Some(caught) = tools::snap(
@@ -1337,16 +1381,13 @@ impl App {
             && let Some((index, held, from)) = &self.moving
         {
             let (index, from) = (*index, *from);
+            let held = held.as_ref().clone();
             let to = self.page_point(pos);
-            let to = if input.shift {
-                geom::orthogonal(from, to)
-            } else {
-                to
-            };
+            let to = self.constrain(from, to, input.shift);
 
             // Moved from where it was rather than by this frame's delta, so a
             // constrained drag cannot creep off the line it is held to.
-            let mut moved = held.as_ref().clone();
+            let mut moved = held;
             moved.translate(to - from);
 
             if let Some(measurements) = self.project.measurements.get_mut(&self.page)
@@ -1358,6 +1399,7 @@ impl App {
 
         if response.drag_stopped_by(egui::PointerButton::Primary) {
             self.moving = None;
+            self.constraint = None;
         }
 
         if input.delete

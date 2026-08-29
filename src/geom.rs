@@ -269,15 +269,31 @@ pub fn smooth_handles(previous: Point, pos: Point, next: Point) -> (Vec2, Vec2) 
     )
 }
 
-/// `point` pulled onto the horizontal or vertical through `from`, whichever of
-/// the two it is already nearer to.
-pub fn orthogonal(from: Point, point: Point) -> Point {
-    let delta = point - from;
+/// The direction a constrained drag is held to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    Horizontal,
+    Vertical,
+}
 
-    if delta.x.abs() >= delta.y.abs() {
-        Point::new(point.x, from.y)
-    } else {
-        Point::new(from.x, point.y)
+impl Axis {
+    /// Whichever axis the movement so far is more along.
+    pub fn of(from: Point, point: Point) -> Self {
+        let delta = point - from;
+
+        if delta.x.abs() >= delta.y.abs() {
+            Self::Horizontal
+        } else {
+            Self::Vertical
+        }
+    }
+
+    /// `point` pulled onto this axis through `from`.
+    pub fn hold(self, from: Point, point: Point) -> Point {
+        match self {
+            Self::Horizontal => Point::new(point.x, from.y),
+            Self::Vertical => Point::new(from.x, point.y),
+        }
     }
 }
 
@@ -680,11 +696,11 @@ mod tests {
         let from = Point::new(100.0, 100.0);
 
         assert_eq!(
-            orthogonal(from, Point::new(180.0, 112.0)),
+            Axis::of(from, Point::new(180.0, 112.0)).hold(from, Point::new(180.0, 112.0)),
             Point::new(180.0, 100.0)
         );
         assert_eq!(
-            orthogonal(from, Point::new(112.0, 180.0)),
+            Axis::of(from, Point::new(112.0, 180.0)).hold(from, Point::new(112.0, 180.0)),
             Point::new(100.0, 180.0)
         );
     }
