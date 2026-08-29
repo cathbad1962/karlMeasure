@@ -161,5 +161,6 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: 2 — not started.** Slice 1 is accepted: `Open…` renders page 1
-fitted to the window. Update this line when a slice is accepted.
+**Current slice: 3 — not started.** Slice 2 is accepted: the page pans, zooms
+about the cursor and steps between pages, rendering only the visible region.
+Update this line when a slice is accepted.
