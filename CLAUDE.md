@@ -162,7 +162,6 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: 7 — not started.** Slices 5 and 6 are accepted: dragging while
-placing pulls mirrored handles, and a placed anchor can be moved, inserted,
-deleted or toggled, with undo and redo behind every change.
+**Current slice: 8 — not started.** Slice 7 is accepted: measurements are
+listed, named, coloured and hidden, and holes subtract by winding.
 Update this line when a slice is accepted.
