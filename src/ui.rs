@@ -143,6 +143,12 @@ pub struct App {
     entry: Option<Entry>,
     /// Present while the area tool is armed.
     pen: Option<Pen>,
+    /// The measurement a traced outline becomes a hole in, when the pen was
+    /// armed from a row of the list rather than from the toolbar.
+    pen_target: Option<usize>,
+    /// The measurement whose name is being typed, so a rename is one thing to
+    /// undo rather than one per keystroke.
+    renaming: Option<usize>,
     /// Present while the edit tool is armed.
     editor: Option<Editor>,
     error: Option<String>,
@@ -207,8 +213,12 @@ impl App {
                     self.pen = None;
                 }
 
-                // A selection indexes into one page's measurements, so it
-                // means nothing on another.
+                // A selection, and the measurement a hole was going to go
+                // into, index one page's measurements and mean nothing on
+                // another.
+                self.pen_target = None;
+                self.renaming = None;
+
                 if self.project.measurements.contains_key(&index) {
                     self.forget_selection();
                 } else {
@@ -238,6 +248,7 @@ impl App {
     fn disarm(&mut self) {
         self.cancel_pick();
         self.pen = None;
+        self.pen_target = None;
         self.editor = None;
     }
 
@@ -316,16 +327,27 @@ impl App {
         }
     }
 
-    /// Records a closed outline as a measurement on the current page.
-    fn add_measurement(&mut self, outer: SubPath) {
+    /// Records a closed outline: as a hole in the measurement the pen was
+    /// armed for, or as a new measurement on the page.
+    fn add_outline(&mut self, outline: SubPath) {
         self.commit();
 
+        let target = self.pen_target;
         let measurements = self.project.measurements.entry(self.page).or_default();
+
+        if let Some(measurement) = target.and_then(|index| measurements.get_mut(index)) {
+            // Wound against its outline, so it takes area away rather than
+            // adding it, however it was traced.
+            let hole = geom::as_hole(&measurement.outer, outline);
+            measurement.holes.push(hole);
+            return;
+        }
+
         let name = format!("Area {}", measurements.len() + 1);
 
         measurements.push(Measurement {
             name,
-            outer,
+            outer: outline,
             holes: Vec::new(),
             colour: OUTLINE,
             visible: true,
@@ -468,7 +490,10 @@ impl App {
             if !calibrated {
                 ui.label("Calibrate this page first");
             } else if tracing {
-                ui.label("Click to place corners, right-click to close");
+                match self.pen_target {
+                    Some(_) => ui.label("Tracing a hole; right-click to close"),
+                    None => ui.label("Click to place corners, right-click to close"),
+                };
             } else if editing {
                 ui.label("Drag an anchor or handle; click an edge to add; Delete, S to toggle");
             }
@@ -609,7 +634,7 @@ impl App {
             if response.secondary_clicked()
                 && let Some(outer) = self.pen.as_mut().and_then(Pen::close)
             {
-                self.add_measurement(outer);
+                self.add_outline(outer);
             }
         }
 
@@ -627,6 +652,116 @@ impl App {
         let cursor = cursor.map(|pos| self.viewport.screen_to_page(to_kurbo_point(pos)));
         self.paint(ui, canvas, cursor);
         self.distance_entry(ui);
+    }
+
+    /// The list of what has been measured on this page, and everything that
+    /// can be done to a measurement as a whole.
+    fn measurements_panel(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::right("measurements")
+            .default_size(320.0)
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.heading("Measurements");
+                ui.add_space(4.0);
+
+                let Some(calibration) = self.project.calibrations.get(&self.page).copied() else {
+                    ui.label("Calibrate this page to measure areas on it.");
+                    return;
+                };
+
+                if self
+                    .project
+                    .measurements
+                    .get(&self.page)
+                    .is_none_or(Vec::is_empty)
+                {
+                    ui.label("Nothing traced on this page yet.");
+                    return;
+                }
+
+                // Widgets change the value in place, so the state to go back
+                // to has to be kept before any of them run.
+                let snapshot = self.project.clone();
+                let mut changed = false;
+                let mut renaming = self.renaming;
+                let mut remove = None;
+                let mut hole_in = None;
+
+                let measurements = self
+                    .project
+                    .measurements
+                    .get_mut(&self.page)
+                    .expect("checked above");
+
+                for (index, measurement) in measurements.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        changed |= ui.checkbox(&mut measurement.visible, "").changed();
+                        changed |= ui
+                            .color_edit_button_srgba(&mut measurement.colour)
+                            .changed();
+
+                        let name = ui.add(
+                            egui::TextEdit::singleline(&mut measurement.name).desired_width(150.0),
+                        );
+
+                        // One undo step per rename, not one per keystroke.
+                        if name.changed() && renaming != Some(index) {
+                            changed = true;
+                            renaming = Some(index);
+                        }
+                        if name.lost_focus() && renaming == Some(index) {
+                            renaming = None;
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label(area_label(
+                            calibration.square_millimetres(geom::measurement_area(measurement)),
+                            calibration.unit,
+                        ));
+
+                        if !measurement.holes.is_empty() {
+                            ui.weak(format!("less {} holes", measurement.holes.len()));
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Remove").clicked() {
+                                remove = Some(index);
+                            }
+                            if ui.button("Hole").clicked() {
+                                hole_in = Some(index);
+                            }
+                        });
+                    });
+
+                    ui.separator();
+                }
+
+                if let Some(index) = remove
+                    && index < measurements.len()
+                {
+                    measurements.remove(index);
+                    changed = true;
+                }
+
+                self.renaming = renaming;
+
+                if changed {
+                    self.undo.push(snapshot);
+                    self.redo.clear();
+                }
+
+                if remove.is_some() {
+                    // The indices everything else was holding have moved.
+                    self.disarm();
+                }
+
+                if let Some(index) = hole_in {
+                    self.disarm();
+                    self.pen = Some(Pen::default());
+                    self.pen_target = Some(index);
+                }
+            });
     }
 
     /// Where a screen position falls on the page.
@@ -866,6 +1001,10 @@ impl App {
             .flatten()
             .enumerate()
         {
+            if !measurement.visible {
+                continue;
+            }
+
             for (at, anchor) in measurement.outer.anchors.iter().enumerate() {
                 let selected = editor.selected
                     == Some(tools::Selection {
@@ -890,29 +1029,41 @@ impl App {
         }
     }
 
-    /// A finished area: its outline, and what it encloses in real units.
+    /// A finished area: its outline, the holes in it, and what it covers in
+    /// real units once they are taken off.
     fn draw_measurement(&self, painter: &egui::Painter, measurement: &Measurement) {
-        let outline = geom::outline(&measurement.outer, FLATNESS / self.viewport.zoom);
-        if outline.is_empty() {
+        if !measurement.visible {
             return;
         }
 
-        painter.add(egui::Shape::closed_line(
-            outline.iter().map(|&p| self.screen(p)).collect(),
-            egui::Stroke::new(1.5, measurement.colour),
-        ));
+        let stroke = egui::Stroke::new(1.5, measurement.colour);
+        let tolerance = FLATNESS / self.viewport.zoom;
+
+        for subpath in std::iter::once(&measurement.outer).chain(&measurement.holes) {
+            let outline = geom::outline(subpath, tolerance);
+            if outline.len() < 2 {
+                continue;
+            }
+
+            painter.add(egui::Shape::closed_line(
+                outline.iter().map(|&p| self.screen(p)).collect(),
+                stroke,
+            ));
+        }
 
         let Some(calibration) = self.project.calibrations.get(&self.page) else {
             return;
         };
 
+        let area = area_label(
+            calibration.square_millimetres(geom::measurement_area(measurement)),
+            calibration.unit,
+        );
+
         self.draw_label(
             painter,
             geom::centre(&measurement.outer),
-            &area_label(
-                calibration.square_millimetres(geom::area(&measurement.outer)),
-                calibration.unit,
-            ),
+            &format!("{} · {area}", measurement.name),
         );
     }
 
@@ -1068,6 +1219,10 @@ fn scale_label(calibration: &Calibration) -> String {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+
+        if self.document.is_some() && self.error.is_none() {
+            self.measurements_panel(ui);
+        }
 
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(message) = self.error.clone() {

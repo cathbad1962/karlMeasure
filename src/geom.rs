@@ -3,7 +3,7 @@
 
 use kurbo::{BezPath, CubicBez, ParamCurve, ParamCurveNearest, PathEl, Point, Shape, Vec2};
 
-use crate::doc::{Anchor, AnchorKind, SubPath};
+use crate::doc::{Anchor, AnchorKind, Measurement, SubPath};
 
 /// How precisely to locate the closest point on a curve, in page units. Well
 /// below anything a hand can aim at.
@@ -39,17 +39,57 @@ fn push_segment(path: &mut BezPath, from: &Anchor, to: &Anchor) {
     path.curve_to(from.pos + from.out_handle, to.pos + to.in_handle, to.pos);
 }
 
-/// The area a closed subpath encloses, in square page points.
+/// The signed area a closed subpath encloses, in square page points.
 ///
-/// Computed analytically from the curve, never from the flattened outline, and
-/// returned unsigned: which way round the outline was traced is not something
-/// the person tracing it should have to think about.
-pub fn area(subpath: &SubPath) -> f64 {
+/// Computed analytically from the curve, never from the flattened outline. The
+/// sign follows the direction it was traced, which is the whole mechanism by
+/// which holes subtract.
+pub fn signed_area(subpath: &SubPath) -> f64 {
     if !subpath.closed || subpath.anchors.len() < 3 {
         return 0.0;
     }
 
-    bez_path(subpath).area().abs()
+    bez_path(subpath).area()
+}
+
+/// What a measurement covers: its outline, less the holes punched in it.
+///
+/// Holes are wound against the outline, so their signed areas cancel part of
+/// it. Nothing here has to know which subpath is a hole; the sum does it.
+pub fn measurement_area(measurement: &Measurement) -> f64 {
+    let holes: f64 = measurement.holes.iter().map(signed_area).sum();
+
+    (signed_area(&measurement.outer) + holes).abs()
+}
+
+/// The same subpath traced the other way round: the anchors in reverse, each
+/// with its handles swapped, which is what makes the reversal geometric rather
+/// than just an ordering.
+pub fn reverse(subpath: &SubPath) -> SubPath {
+    SubPath {
+        anchors: subpath
+            .anchors
+            .iter()
+            .rev()
+            .map(|anchor| Anchor {
+                pos: anchor.pos,
+                in_handle: anchor.out_handle,
+                out_handle: anchor.in_handle,
+                kind: anchor.kind,
+            })
+            .collect(),
+        closed: subpath.closed,
+    }
+}
+
+/// `hole` wound against `outer`, so the two signed areas subtract instead of
+/// adding. Whichever way round it was traced, it takes area away.
+pub fn as_hole(outer: &SubPath, hole: SubPath) -> SubPath {
+    if signed_area(outer) * signed_area(&hole) > 0.0 {
+        reverse(&hole)
+    } else {
+        hole
+    }
 }
 
 /// How many segments a subpath has: one per gap between anchors, plus the one
@@ -201,7 +241,7 @@ mod tests {
             true,
         );
 
-        assert!((area(&square) - 10_000.0).abs() < 1e-9);
+        assert!((signed_area(&square).abs() - 10_000.0).abs() < 1e-9);
     }
 
     /// Tracing the other way round negates the signed area, not the answer.
@@ -216,14 +256,14 @@ mod tests {
             true,
         );
 
-        assert!((area(&clockwise) - area(&anticlockwise)).abs() < 1e-9);
+        assert!((signed_area(&clockwise).abs() - signed_area(&anticlockwise).abs()).abs() < 1e-9);
     }
 
     #[test]
     fn a_triangle_encloses_half_its_base_times_its_height() {
         let triangle = corners(&[(0.0, 0.0), (60.0, 0.0), (0.0, 40.0)], true);
 
-        assert!((area(&triangle) - 1_200.0).abs() < 1e-9);
+        assert!((signed_area(&triangle).abs() - 1_200.0).abs() < 1e-9);
     }
 
     /// Four smooth anchors with the standard handle length trace a circle.
@@ -270,8 +310,11 @@ mod tests {
         };
 
         let expected = std::f64::consts::PI * r * r;
-        assert!((area(&circle) - expected).abs() / expected < 0.001);
-        assert!(area(&circle) > 2.0 * r * r * 1.5, "not the polygon's area");
+        assert!((signed_area(&circle).abs() - expected).abs() / expected < 0.001);
+        assert!(
+            signed_area(&circle).abs() > 2.0 * r * r * 1.5,
+            "not the polygon's area"
+        );
     }
 
     #[test]
@@ -279,8 +322,115 @@ mod tests {
         let open = corners(&[(0.0, 0.0), (60.0, 0.0), (0.0, 40.0)], false);
         let two_points = corners(&[(0.0, 0.0), (60.0, 0.0)], true);
 
-        assert_eq!(area(&open), 0.0);
-        assert_eq!(area(&two_points), 0.0);
+        assert_eq!(signed_area(&open).abs(), 0.0);
+        assert_eq!(signed_area(&two_points).abs(), 0.0);
+    }
+
+    fn measurement(outer: SubPath, holes: Vec<SubPath>) -> Measurement {
+        Measurement {
+            name: "Area 1".to_owned(),
+            outer,
+            holes,
+            colour: eframe::egui::Color32::WHITE,
+            visible: true,
+        }
+    }
+
+    /// A hundred-unit square with a twenty-unit square taken out of it.
+    #[test]
+    fn a_hole_comes_off_the_area() {
+        let outer = corners(
+            &[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
+            true,
+        );
+        let hole = corners(
+            &[(10.0, 10.0), (30.0, 10.0), (30.0, 30.0), (10.0, 30.0)],
+            true,
+        );
+
+        let wound = as_hole(&outer, hole);
+        let measured = measurement(outer, vec![wound]);
+
+        assert!((measurement_area(&measured) - 9_600.0).abs() < 1e-9);
+    }
+
+    /// Which way round the hole was traced is not the tracer's problem.
+    #[test]
+    fn a_hole_subtracts_whichever_way_round_it_was_traced() {
+        let outer = corners(
+            &[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
+            true,
+        );
+        let clockwise = corners(
+            &[(10.0, 10.0), (30.0, 10.0), (30.0, 30.0), (10.0, 30.0)],
+            true,
+        );
+        let anticlockwise = reverse(&clockwise);
+
+        let one = measurement(outer.clone(), vec![as_hole(&outer, clockwise)]);
+        let other = measurement(outer.clone(), vec![as_hole(&outer, anticlockwise)]);
+
+        assert!((measurement_area(&one) - measurement_area(&other)).abs() < 1e-9);
+        assert!((measurement_area(&one) - 9_600.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn every_hole_subtracts() {
+        let outer = corners(
+            &[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
+            true,
+        );
+        let first = corners(
+            &[(10.0, 10.0), (30.0, 10.0), (30.0, 30.0), (10.0, 30.0)],
+            true,
+        );
+        let second = corners(
+            &[(50.0, 50.0), (60.0, 50.0), (60.0, 60.0), (50.0, 60.0)],
+            true,
+        );
+
+        let measured = measurement(
+            outer.clone(),
+            vec![as_hole(&outer, first), as_hole(&outer, second)],
+        );
+
+        assert!((measurement_area(&measured) - 9_500.0).abs() < 1e-9);
+    }
+
+    /// Reversing a subpath negates what it encloses without moving it.
+    #[test]
+    fn reversing_negates_the_signed_area_and_nothing_else() {
+        const KAPPA: f64 = 0.552_284_749_831;
+        let pull = KAPPA * 20.0;
+
+        let curved = SubPath {
+            anchors: vec![
+                Anchor {
+                    pos: Point::new(20.0, 0.0),
+                    in_handle: Vec2::new(0.0, -pull),
+                    out_handle: Vec2::new(0.0, pull),
+                    kind: AnchorKind::Smooth,
+                },
+                Anchor {
+                    pos: Point::new(0.0, 20.0),
+                    in_handle: Vec2::new(pull, 0.0),
+                    out_handle: Vec2::new(-pull, 0.0),
+                    kind: AnchorKind::Smooth,
+                },
+                Anchor {
+                    pos: Point::new(-20.0, 0.0),
+                    in_handle: Vec2::new(0.0, pull),
+                    out_handle: Vec2::new(0.0, -pull),
+                    kind: AnchorKind::Smooth,
+                },
+            ],
+            closed: true,
+        };
+
+        let backwards = reverse(&curved);
+
+        assert!((signed_area(&curved) + signed_area(&backwards)).abs() < 1e-9);
+        assert!((signed_area(&curved).abs() - signed_area(&backwards).abs()).abs() < 1e-9);
     }
 
     /// Splitting a curve is only worth anything if it does not move it, which
@@ -314,12 +464,12 @@ mod tests {
             closed: true,
         };
 
-        let before = area(&circle);
+        let before = signed_area(&circle).abs();
         let at = insert_anchor(&mut circle, 0, 0.37).expect("segment 0 exists");
 
         assert_eq!(at, 1);
         assert_eq!(circle.anchors.len(), 4);
-        assert!((area(&circle) - before).abs() / before < 1e-9);
+        assert!((signed_area(&circle).abs() - before).abs() / before < 1e-9);
     }
 
     /// A straight edge gains a corner and stays exactly as straight.
@@ -330,14 +480,14 @@ mod tests {
             true,
         );
 
-        let before = area(&square);
+        let before = signed_area(&square).abs();
         let at = insert_anchor(&mut square, 0, 0.5).expect("segment 0 exists");
 
         assert_eq!(at, 1);
         assert_eq!(square.anchors[1].pos, Point::new(50.0, 0.0));
         assert_eq!(square.anchors[1].kind, AnchorKind::Corner);
         assert_eq!(square.anchors[0].out_handle, Vec2::ZERO);
-        assert!((area(&square) - before).abs() < 1e-9);
+        assert!((signed_area(&square).abs() - before).abs() < 1e-9);
     }
 
     /// The segment back to the first anchor is the last one, and inserting on

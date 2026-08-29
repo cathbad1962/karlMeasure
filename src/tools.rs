@@ -115,7 +115,7 @@ impl Editor {
             }
         }
 
-        for (index, measurement) in measurements.iter().enumerate() {
+        for (index, measurement) in visible(measurements) {
             for (at, anchor) in measurement.outer.anchors.iter().enumerate() {
                 if (anchor.pos - point).hypot() <= radius {
                     return Some((
@@ -131,6 +131,15 @@ impl Editor {
 
         None
     }
+}
+
+/// The measurements a click can reach, keeping the index each one is filed
+/// under: a hidden outline is not there to be grabbed.
+fn visible(measurements: &[Measurement]) -> impl Iterator<Item = (usize, &Measurement)> {
+    measurements
+        .iter()
+        .enumerate()
+        .filter(|(_, measurement)| measurement.visible)
 }
 
 fn anchor(measurements: &[Measurement], selection: Selection) -> Option<&Anchor> {
@@ -189,9 +198,7 @@ pub fn move_to(
 /// Inserts an anchor where `point` falls on an outline, if it falls within
 /// `radius` of one, and says which anchor to select next.
 pub fn insert(measurements: &mut [Measurement], point: Point, radius: f64) -> Option<Selection> {
-    let (index, found) = measurements
-        .iter()
-        .enumerate()
+    let (index, found) = visible(measurements)
         .filter_map(|(index, measurement)| Some((index, geom::nearest(&measurement.outer, point)?)))
         .min_by(|a, b| a.1.distance.total_cmp(&b.1.distance))?;
 
