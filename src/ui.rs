@@ -27,6 +27,9 @@ const SPAN: egui::Color32 = egui::Color32::from_rgb(224, 132, 24);
 /// same size on screen whatever the zoom.
 const TICK: f64 = 6.0;
 
+/// The shortest span that can be calibrated, in logical points on screen.
+const MIN_SPAN: f64 = 3.0;
+
 /// What the current texture holds, and where it sits on the page.
 struct Rendered {
     texture: egui::TextureHandle,
@@ -49,8 +52,8 @@ struct Entry {
     unit: Unit,
     /// The field takes focus on the frame the panel opens, not every frame.
     focused: bool,
-    /// Set once a distance has been rejected, to explain why the panel stayed.
-    rejected: bool,
+    /// Why the last attempt was refused, if it was.
+    problem: Option<&'static str>,
 }
 
 #[derive(Default)]
@@ -146,6 +149,14 @@ impl App {
         match self.pick {
             Some(Pick::First) => self.pick = Some(Pick::Second { from: point }),
             Some(Pick::Second { from }) => {
+                // A span of no length yields no scale, so treat a second click
+                // on top of the first as a misfire and keep waiting for a
+                // usable one. The threshold is on screen, not on the page, so
+                // zooming in lets the two ends be placed as close as you like.
+                if (point - from).hypot() * self.viewport.zoom < MIN_SPAN {
+                    return;
+                }
+
                 self.pick = None;
                 self.entry = Some(Entry {
                     from,
@@ -153,7 +164,7 @@ impl App {
                     distance: String::new(),
                     unit: Unit::Millimetres,
                     focused: false,
-                    rejected: false,
+                    problem: None,
                 });
             }
             None => {}
@@ -389,11 +400,8 @@ impl App {
                         });
                 });
 
-                if entry.rejected {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        "Enter a distance greater than zero.",
-                    );
+                if let Some(problem) = entry.problem {
+                    ui.colored_label(ui.visuals().error_fg_color, problem);
                 }
 
                 ui.horizontal(|ui| {
@@ -405,25 +413,27 @@ impl App {
                 });
 
                 if accept {
-                    let calibration =
-                        entry
-                            .distance
-                            .trim()
-                            .parse::<f64>()
-                            .ok()
-                            .and_then(|distance| {
-                                Calibration::new(entry.from, entry.to, distance, entry.unit)
-                            });
+                    // Say which of the two things was wrong: what was typed,
+                    // or what it would mean.
+                    entry.problem = match entry.distance.trim().parse::<f64>() {
+                        Err(_) => {
+                            Some("That is not a number. Use a full stop for the decimal point.")
+                        }
+                        Ok(distance) => {
+                            match Calibration::new(entry.from, entry.to, distance, entry.unit) {
+                                Some(calibration) => {
+                                    self.calibrations.insert(self.page, calibration);
+                                    keep = false;
+                                    None
+                                }
+                                None => Some("Enter a distance greater than zero."),
+                            }
+                        }
+                    };
 
-                    match calibration {
-                        Some(calibration) => {
-                            self.calibrations.insert(self.page, calibration);
-                            keep = false;
-                        }
-                        None => {
-                            entry.rejected = true;
-                            entry.focused = false;
-                        }
+                    if entry.problem.is_some() {
+                        // Put the cursor back in the field to correct it.
+                        entry.focused = false;
                     }
                 }
             });
