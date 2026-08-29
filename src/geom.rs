@@ -199,6 +199,18 @@ pub fn smooth_handles(previous: Point, pos: Point, next: Point) -> (Vec2, Vec2) 
     )
 }
 
+/// `point` pulled onto the horizontal or vertical through `from`, whichever of
+/// the two it is already nearer to.
+pub fn orthogonal(from: Point, point: Point) -> Point {
+    let delta = point - from;
+
+    if delta.x.abs() >= delta.y.abs() {
+        Point::new(point.x, from.y)
+    } else {
+        Point::new(from.x, point.y)
+    }
+}
+
 /// Where a caption for this subpath sits: the centre of its bounding box.
 pub fn centre(subpath: &SubPath) -> Point {
     bez_path(subpath).bounding_box().center()
@@ -526,6 +538,21 @@ mod tests {
             .expect("segment 1 exists")
             .eval(found.t);
         assert!((on_curve - Point::new(100.0, 30.0)).hypot() < 1e-3);
+    }
+
+    /// The constraint holds whichever axis the hand was already closer to.
+    #[test]
+    fn orthogonal_holds_the_nearer_axis() {
+        let from = Point::new(100.0, 100.0);
+
+        assert_eq!(
+            orthogonal(from, Point::new(180.0, 112.0)),
+            Point::new(180.0, 100.0)
+        );
+        assert_eq!(
+            orthogonal(from, Point::new(112.0, 180.0)),
+            Point::new(100.0, 180.0)
+        );
     }
 
     /// Smoothing points the handles along the line joining the neighbours, so

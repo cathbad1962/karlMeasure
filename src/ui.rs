@@ -54,6 +54,60 @@ const SELECTED: egui::Color32 = egui::Color32::from_rgb(255, 210, 80);
 /// on screen. Divided by zoom to get the flattening tolerance in page units.
 const FLATNESS: f64 = 0.25;
 
+/// How near an existing anchor a placement has to fall to be pulled onto it,
+/// in logical points on screen.
+const SNAP: f64 = 10.0;
+
+/// The ring drawn round the anchor a placement has caught.
+const SNAPPED: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
+
+/// The side of the magnifier, in logical points on screen.
+const LOUPE: f32 = 150.0;
+
+/// How far the magnifier sits from the cursor, so it never covers the target.
+const LOUPE_OFFSET: f32 = 22.0;
+
+/// How much the magnifier magnifies, over the current zoom.
+const MAGNIFY: f64 = 4.0;
+
+/// The magnifier re-renders once the cursor has been this still. Rendering is
+/// priced by what is on the page, not by the size of the bitmap, so this
+/// cannot be done per frame.
+const LOUPE_SETTLE: Duration = Duration::from_millis(90);
+
+/// The tools, one of which is always the one in hand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Tool {
+    #[default]
+    Select,
+    Area,
+    Calibrate,
+}
+
+/// The precision aids, which are toggles rather than tools.
+struct Assist {
+    snap: bool,
+    magnifier: bool,
+}
+
+impl Default for Assist {
+    fn default() -> Self {
+        Self {
+            snap: true,
+            magnifier: true,
+        }
+    }
+}
+
+/// The magnified patch of drawing under the cursor.
+struct Loupe {
+    texture: egui::TextureHandle,
+    /// Page space, what the texture covers.
+    region: Rect,
+    /// The page point it was rendered around.
+    centred_on: Point,
+}
+
 /// What the current texture holds, and where it sits on the page.
 struct Rendered {
     texture: egui::TextureHandle,
@@ -77,32 +131,48 @@ struct Input {
     toggle: bool,
     undo: bool,
     redo: bool,
+    select: bool,
+    area: bool,
+    calibrate: bool,
+    snap: bool,
+    magnifier: bool,
     scroll: f64,
     cursor: Option<egui::Pos2>,
     /// Where the button went down, while one is held.
     pressed_at: Option<egui::Pos2>,
     alt: bool,
+    shift: bool,
 }
 
 impl Input {
     fn read(ui: &egui::Ui) -> Self {
+        // While a name or a distance is being typed, the keyboard belongs to
+        // the field, not to the tools. Escape is the exception: it means "let
+        // go of this" wherever it is pressed.
+        let typing = ui.ctx().egui_wants_keyboard_input();
+
         ui.input(|i| {
-            let command = i.modifiers.command;
+            let key = |key| !typing && i.key_pressed(key);
+            let command = !typing && i.modifiers.command;
 
             Self {
-                page_up: i.key_pressed(egui::Key::PageUp),
-                page_down: i.key_pressed(egui::Key::PageDown),
+                page_up: key(egui::Key::PageUp),
+                page_down: key(egui::Key::PageDown),
                 escape: i.key_pressed(egui::Key::Escape),
-                delete: i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
-                toggle: i.key_pressed(egui::Key::S),
-                undo: command && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
-                redo: command
-                    && (i.key_pressed(egui::Key::Y)
-                        || (i.modifiers.shift && i.key_pressed(egui::Key::Z))),
+                delete: key(egui::Key::Delete) || key(egui::Key::Backspace),
+                toggle: key(egui::Key::S),
+                undo: command && !i.modifiers.shift && key(egui::Key::Z),
+                redo: command && (key(egui::Key::Y) || (i.modifiers.shift && key(egui::Key::Z))),
+                select: key(egui::Key::V),
+                area: i.modifiers.shift && i.modifiers.alt && key(egui::Key::A),
+                calibrate: i.modifiers.shift && i.modifiers.alt && key(egui::Key::C),
+                snap: key(egui::Key::N),
+                magnifier: key(egui::Key::M),
                 scroll: i.smooth_scroll_delta.y as f64,
                 cursor: i.pointer.hover_pos(),
                 pressed_at: i.pointer.press_origin(),
                 alt: i.modifiers.alt,
+                shift: i.modifiers.shift,
             }
         })
     }
@@ -139,6 +209,10 @@ pub struct App {
     /// States to go back to, and the ones undone out of.
     undo: Vec<Project>,
     redo: Vec<Project>,
+    /// The tool in hand, and the state belonging to it.
+    tool: Tool,
+    /// The precision aids, on or off.
+    assist: Assist,
     pick: Option<Pick>,
     entry: Option<Entry>,
     /// Present while the area tool is armed.
@@ -151,6 +225,12 @@ pub struct App {
     renaming: Option<usize>,
     /// Present while the edit tool is armed.
     editor: Option<Editor>,
+    /// The magnified patch under the cursor, and when to re-render it.
+    loupe: Option<Loupe>,
+    loupe_settle: Option<Instant>,
+    /// The anchor a placement is currently caught on, for the frame it is
+    /// drawn in.
+    snapped: Option<Point>,
     error: Option<String>,
 }
 
@@ -168,7 +248,7 @@ impl App {
         self.project = Project::default();
         self.undo.clear();
         self.redo.clear();
-        self.disarm();
+        self.take_up(Tool::Select);
 
         match pdf::Document::open(&path) {
             Ok(document) => {
@@ -204,25 +284,16 @@ impl App {
                 self.resettle_at = None;
 
                 // An outline belongs to the page it was traced on, and there
-                // is nothing to trace on a page with no scale.
-                if self.project.calibrations.contains_key(&index) {
-                    if let Some(pen) = &mut self.pen {
-                        pen.clear();
-                    }
-                } else {
-                    self.pen = None;
-                }
-
-                // A selection, and the measurement a hole was going to go
-                // into, index one page's measurements and mean nothing on
-                // another.
-                self.pen_target = None;
+                // is nothing to trace on a page with no scale. A selection,
+                // and the measurement a hole was going to go into, index one
+                // page's measurements and mean nothing on another.
                 self.renaming = None;
+                self.loupe = None;
 
-                if self.project.measurements.contains_key(&index) {
-                    self.forget_selection();
+                if self.tool == Tool::Area && !self.project.calibrations.contains_key(&index) {
+                    self.take_up(Tool::Select);
                 } else {
-                    self.editor = None;
+                    self.take_up(self.tool);
                 }
             }
             Err(message) => {
@@ -244,12 +315,20 @@ impl App {
         self.entry = None;
     }
 
-    /// Puts every tool away. Only one is ever armed at a time.
-    fn disarm(&mut self) {
+    /// Takes up a tool, putting down whatever was in hand. Each tool's state
+    /// starts fresh, so nothing half-done carries across.
+    fn take_up(&mut self, tool: Tool) {
         self.cancel_pick();
         self.pen = None;
         self.pen_target = None;
         self.editor = None;
+        self.tool = tool;
+
+        match tool {
+            Tool::Select => self.editor = Some(Editor::default()),
+            Tool::Area => self.pen = Some(Pen::default()),
+            Tool::Calibrate => self.pick = Some(Pick::First),
+        }
     }
 
     /// Keeps the state as it stands, so the operation about to change it can
@@ -436,43 +515,6 @@ impl App {
 
             ui.separator();
 
-            let calibrating = self.pick.is_some() || self.entry.is_some();
-            if ui
-                .add(egui::Button::new("Calibrate").selected(calibrating))
-                .clicked()
-            {
-                self.disarm();
-                self.pick = Some(Pick::First);
-            }
-
-            let calibrated = self.project.calibrations.contains_key(&self.page);
-            let tracing = self.pen.is_some();
-            let area = egui::Button::new("Area").selected(tracing);
-
-            if ui.add_enabled(calibrated, area).clicked() {
-                self.disarm();
-                self.pen = if tracing { None } else { Some(Pen::default()) };
-            }
-
-            let traced = self
-                .project
-                .measurements
-                .get(&self.page)
-                .is_some_and(|measurements| !measurements.is_empty());
-            let editing = self.editor.is_some();
-            let edit = egui::Button::new("Edit").selected(editing);
-
-            if ui.add_enabled(traced, edit).clicked() {
-                self.disarm();
-                self.editor = if editing {
-                    None
-                } else {
-                    Some(Editor::default())
-                };
-            }
-
-            ui.separator();
-
             if ui
                 .add_enabled(!self.undo.is_empty(), egui::Button::new("↶"))
                 .clicked()
@@ -487,32 +529,124 @@ impl App {
                 self.redo();
             }
 
-            if !calibrated {
-                ui.label("Calibrate this page first");
-            } else if tracing {
-                match self.pen_target {
-                    Some(_) => ui.label("Tracing a hole; right-click to close"),
-                    None => ui.label("Click to place corners, right-click to close"),
-                };
-            } else if editing {
-                ui.label("Drag an anchor or handle; click an edge to add; Delete, S to toggle");
-            }
+            ui.separator();
+            ui.label(self.hint());
 
-            match (&self.pick, self.project.calibrations.get(&self.page)) {
-                (Some(Pick::First), _) => {
-                    ui.label("Click the first point");
-                }
-                (Some(Pick::Second { .. }), _) => {
-                    ui.label("Click the second point");
-                }
-                (None, Some(calibration)) => {
-                    ui.label(scale_label(calibration));
-                }
-                (None, None) => {
-                    ui.label("Not calibrated");
-                }
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match self.project.calibrations.get(&self.page) {
+                    Some(calibration) => ui.label(scale_label(calibration)),
+                    None => ui.label("Not calibrated"),
+                };
+            });
         });
+    }
+
+    /// What the tool in hand is waiting for.
+    fn hint(&self) -> &'static str {
+        match self.tool {
+            Tool::Calibrate => match self.pick {
+                Some(Pick::First) => "Click the first point of a known distance",
+                Some(Pick::Second { .. }) => "Click the second point",
+                None => "Enter the distance between the two points",
+            },
+            Tool::Area if !self.project.calibrations.contains_key(&self.page) => {
+                "Calibrate this page before measuring areas on it"
+            }
+            Tool::Area if self.pen_target.is_some() => "Tracing a hole; right-click to close",
+            Tool::Area => "Click to place corners, drag to curve, right-click to close",
+            Tool::Select => "Drag an anchor or handle; click an edge to add; Delete, S to toggle",
+        }
+    }
+
+    /// The tools, in a strip down the left: the ones that change what the
+    /// pointer does, and the aids that change how precisely it does it.
+    fn tool_strip(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("tools")
+            .exact_size(46.0)
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.add_space(6.0);
+
+                let calibrated = self.project.calibrations.contains_key(&self.page);
+
+                for (tool, letter, name, enabled) in [
+                    (Tool::Select, "V", "Select (V)", true),
+                    (Tool::Area, "A", "Area (Shift+Alt+A)", calibrated),
+                ] {
+                    let button = egui::Button::new(letter).selected(self.tool == tool);
+
+                    if ui
+                        .add_enabled_ui(enabled, |ui| {
+                            ui.add_sized([32.0, 28.0], button).on_hover_text(name)
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        self.take_up(tool);
+                    }
+                    ui.add_space(2.0);
+                }
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                for (on, letter, name) in [
+                    (&mut self.assist.snap, "N", "Snap to anchors (N)"),
+                    (&mut self.assist.magnifier, "M", "Magnifier (M)"),
+                ] {
+                    let button = egui::Button::new(letter).selected(*on);
+
+                    if ui
+                        .add_sized([32.0, 28.0], button)
+                        .on_hover_text(name)
+                        .clicked()
+                    {
+                        *on = !*on;
+                    }
+                    ui.add_space(2.0);
+                }
+            });
+    }
+
+    /// The measurement tools, grouped and collapsible.
+    fn tool_groups(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("tool_groups")
+            .default_size(170.0)
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+
+                egui::CollapsingHeader::new("Measurement")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let width = ui.available_width();
+                        let calibrated = self.project.calibrations.contains_key(&self.page);
+
+                        let calibrate =
+                            egui::Button::new("Calibrate").selected(self.tool == Tool::Calibrate);
+                        if ui.add_sized([width, 24.0], calibrate).clicked() {
+                            self.take_up(Tool::Calibrate);
+                        }
+
+                        let area = egui::Button::new("Area").selected(self.tool == Tool::Area);
+                        if ui
+                            .add_enabled_ui(calibrated, |ui| ui.add_sized([width, 24.0], area))
+                            .inner
+                            .on_hover_text("Shift+Alt+A")
+                            .clicked()
+                        {
+                            self.take_up(Tool::Area);
+                        }
+
+                        // Placeholders only: these tools are out of scope, and
+                        // nothing behind these buttons exists.
+                        for name in ["Length", "Polyline"] {
+                            ui.add_enabled_ui(false, |ui| {
+                                ui.add_sized([width, 24.0], egui::Button::new(name))
+                            });
+                        }
+                    });
+            });
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
@@ -529,6 +663,9 @@ impl App {
         let (scroll, cursor, pressed_at, alt) =
             (input.scroll, input.cursor, input.pressed_at, input.alt);
 
+        // Whatever a placement catches on is worked out afresh each frame.
+        self.snapped = None;
+
         if input.escape {
             self.cancel_pick();
             if let Some(pen) = &mut self.pen {
@@ -541,6 +678,22 @@ impl App {
         }
         if input.redo {
             self.redo();
+        }
+
+        if input.select {
+            self.take_up(Tool::Select);
+        }
+        if input.calibrate {
+            self.take_up(Tool::Calibrate);
+        }
+        if input.area && self.project.calibrations.contains_key(&self.page) {
+            self.take_up(Tool::Area);
+        }
+        if input.snap {
+            self.assist.snap = !self.assist.snap;
+        }
+        if input.magnifier {
+            self.assist.magnifier = !self.assist.magnifier;
         }
 
         if input.page_up && self.page > 0 {
@@ -605,18 +758,26 @@ impl App {
 
             if response.clicked()
                 && let Some(pos) = response.interact_pointer_pos()
-                && let Some(pen) = &mut self.pen
             {
-                pen.place(self.viewport.screen_to_page(to_kurbo_point(pos)));
+                let from = self.pen_from();
+                let at = self.aim(self.page_point(pos), from, &input, None);
+
+                if let Some(pen) = &mut self.pen {
+                    pen.place(at);
+                }
             }
 
             // The anchor belongs where the button went down, not where the
             // drag was recognised, or the outline would shift under the hand.
             if response.drag_started_by(egui::PointerButton::Primary)
                 && let Some(origin) = pressed_at
-                && let Some(pen) = &mut self.pen
             {
-                pen.place(self.viewport.screen_to_page(to_kurbo_point(origin)));
+                let from = self.pen_from();
+                let at = self.aim(self.page_point(origin), from, &input, None);
+
+                if let Some(pen) = &mut self.pen {
+                    pen.place(at);
+                }
             }
 
             if response.dragged_by(egui::PointerButton::Primary)
@@ -649,7 +810,17 @@ impl App {
             ui.ctx().request_repaint_after(SETTLE);
         }
 
-        let cursor = cursor.map(|pos| self.viewport.screen_to_page(to_kurbo_point(pos)));
+        // The preview follows where the placement would actually land, not
+        // where the hand is, so what you see is what you get.
+        let cursor = cursor.map(|pos| self.page_point(pos));
+        let cursor = match cursor {
+            Some(point) if self.pen.is_some() => {
+                let from = self.pen_from();
+                Some(self.aim(point, from, &input, None))
+            }
+            other => other,
+        };
+        self.refresh_loupe(ui.ctx(), cursor, now);
         self.paint(ui, canvas, cursor);
         self.distance_entry(ui);
     }
@@ -753,12 +924,11 @@ impl App {
 
                 if remove.is_some() {
                     // The indices everything else was holding have moved.
-                    self.disarm();
+                    self.take_up(Tool::Select);
                 }
 
                 if let Some(index) = hole_in {
-                    self.disarm();
-                    self.pen = Some(Pen::default());
+                    self.take_up(Tool::Area);
                     self.pen_target = Some(index);
                 }
             });
@@ -767,6 +937,81 @@ impl App {
     /// Where a screen position falls on the page.
     fn page_point(&self, pos: egui::Pos2) -> Point {
         self.viewport.screen_to_page(to_kurbo_point(pos))
+    }
+
+    /// Every anchor a placement could be pulled onto: the visible outlines and
+    /// their holes, and whatever the pen has put down so far.
+    fn snap_targets(&self, except: Option<tools::Selection>) -> Vec<Point> {
+        let mut targets = Vec::new();
+
+        for (index, measurement) in self
+            .project
+            .measurements
+            .get(&self.page)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if !measurement.visible {
+                continue;
+            }
+
+            for (at, anchor) in measurement.outer.anchors.iter().enumerate() {
+                let this = tools::Selection {
+                    measurement: index,
+                    anchor: at,
+                };
+
+                if except != Some(this) {
+                    targets.push(anchor.pos);
+                }
+            }
+
+            for hole in &measurement.holes {
+                targets.extend(hole.anchors.iter().map(|anchor| anchor.pos));
+            }
+        }
+
+        if let Some(pen) = &self.pen {
+            targets.extend(pen.anchors().iter().map(|anchor| anchor.pos));
+        }
+
+        targets
+    }
+
+    /// Where a placement actually lands. Shift holds it square to `from`;
+    /// otherwise it is pulled onto a nearby anchor, if snapping is on and one
+    /// is in reach. The two would fight each other, so Shift wins.
+    fn aim(
+        &mut self,
+        point: Point,
+        from: Option<Point>,
+        input: &Input,
+        except: Option<tools::Selection>,
+    ) -> Point {
+        if input.shift
+            && let Some(from) = from
+        {
+            return geom::orthogonal(from, point);
+        }
+
+        if self.assist.snap
+            && let Some(caught) = tools::snap(
+                point,
+                SNAP / self.viewport.zoom,
+                self.snap_targets(except).into_iter(),
+            )
+        {
+            self.snapped = Some(caught);
+            return caught;
+        }
+
+        point
+    }
+
+    /// The anchor the pen would run a new segment from.
+    fn pen_from(&self) -> Option<Point> {
+        self.pen.as_ref()?.anchors().last().map(|anchor| anchor.pos)
     }
 
     /// What lies under a page-space point: a handle of the selected anchor, or
@@ -801,9 +1046,23 @@ impl App {
         if let Some(found) = grabbed {
             self.commit();
 
+            let origin = self
+                .project
+                .measurements
+                .get(&self.page)
+                .and_then(|measurements| {
+                    measurements
+                        .get(found.0.measurement)?
+                        .outer
+                        .anchors
+                        .get(found.0.anchor)
+                })
+                .map(|anchor| anchor.pos);
+
             if let Some(editor) = &mut self.editor {
                 editor.selected = Some(found.0);
                 editor.grabbed = Some(found);
+                editor.origin = origin;
             }
         }
 
@@ -811,7 +1070,18 @@ impl App {
             && let Some(pos) = response.interact_pointer_pos()
             && let Some((selection, grab)) = self.editor.as_ref().and_then(|e| e.grabbed)
         {
-            let to = self.page_point(pos);
+            let point = self.page_point(pos);
+
+            // An anchor is aimed like a placement; a handle is not, since
+            // neither snapping nor squareness means anything for one.
+            let to = match grab {
+                Grab::Anchor => {
+                    let origin = self.editor.as_ref().and_then(|editor| editor.origin);
+                    self.aim(point, origin, input, Some(selection))
+                }
+                Grab::In | Grab::Out => point,
+            };
+
             let mirror = !input.alt;
             let measurements = self.project.measurements.entry(self.page).or_default();
 
@@ -822,6 +1092,7 @@ impl App {
             && let Some(editor) = &mut self.editor
         {
             editor.grabbed = None;
+            editor.origin = None;
         }
 
         // A click selects what it lands on, or adds an anchor to the edge it
@@ -984,6 +1255,152 @@ impl App {
 
         self.draw_pen(&painter, cursor);
         self.draw_editable(&painter);
+
+        if let Some(caught) = self.snapped {
+            painter.circle_stroke(
+                self.screen(caught),
+                ANCHOR_DOT + 3.0,
+                egui::Stroke::new(1.5, SNAPPED),
+            );
+        }
+
+        self.draw_loupe(&painter, canvas, cursor);
+    }
+
+    /// Whether the magnifier is worth showing: while something is being
+    /// placed or moved, not while the drawing is merely being looked at.
+    fn magnifying(&self) -> bool {
+        if !self.assist.magnifier {
+            return false;
+        }
+
+        match self.tool {
+            Tool::Area | Tool::Calibrate => true,
+            Tool::Select => self
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.grabbed.is_some()),
+        }
+    }
+
+    /// The magnified patch of drawing under the cursor, offset up and to the
+    /// right so it never covers what is being aimed at.
+    fn draw_loupe(&self, painter: &egui::Painter, canvas: Rect, cursor: Option<Point>) {
+        let (Some(loupe), Some(cursor)) = (&self.loupe, cursor) else {
+            return;
+        };
+        if !self.magnifying() {
+            return;
+        }
+
+        let at = self.screen(cursor);
+        let mut rect = egui::Rect::from_min_size(
+            egui::pos2(at.x + LOUPE_OFFSET, at.y - LOUPE_OFFSET - LOUPE),
+            egui::vec2(LOUPE, LOUPE),
+        );
+
+        // Keep it on the canvas when the cursor is near an edge.
+        let bounds = to_egui_rect(canvas);
+        rect = rect.translate(egui::vec2(
+            (bounds.max.x - rect.max.x).min(0.0) - (bounds.min.x - rect.min.x).min(0.0),
+            (bounds.max.y - rect.max.y).min(0.0) - (bounds.min.y - rect.min.y).min(0.0),
+        ));
+
+        // A viewport of its own, magnifying about the point under the cursor.
+        let zoom = self.viewport.zoom * MAGNIFY;
+        let centre = rect.center();
+        let inside = Viewport {
+            zoom,
+            pan: Vec2::new(centre.x as f64, centre.y as f64) - loupe.centred_on.to_vec2() * zoom,
+        };
+
+        let painter = painter.with_clip_rect(rect);
+        painter.rect_filled(rect, 2, egui::Color32::WHITE);
+        painter.image(
+            loupe.texture.id(),
+            to_egui_rect(inside.page_rect_to_screen(loupe.region)),
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+
+        // The crosshair marks the exact point, which is the whole purpose.
+        let arm = 8.0;
+        let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(220, 40, 40));
+        painter.line_segment(
+            [
+                egui::pos2(centre.x - arm, centre.y),
+                egui::pos2(centre.x + arm, centre.y),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(centre.x, centre.y - arm),
+                egui::pos2(centre.x, centre.y + arm),
+            ],
+            stroke,
+        );
+
+        painter.rect_stroke(
+            rect,
+            2,
+            egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    /// Rasterises the patch under the cursor, once it has stopped moving.
+    fn refresh_loupe(&mut self, ctx: &egui::Context, cursor: Option<Point>, now: Instant) {
+        let Some(cursor) = cursor.filter(|_| self.magnifying()) else {
+            self.loupe_settle = None;
+            return;
+        };
+
+        let moved = self
+            .loupe
+            .as_ref()
+            .is_none_or(|loupe| (loupe.centred_on - cursor).hypot() > 0.5 / self.viewport.zoom);
+
+        if moved && self.loupe_settle.is_none() {
+            self.loupe_settle = Some(now + LOUPE_SETTLE);
+        }
+
+        match self.loupe_settle {
+            Some(at) if now >= at => self.loupe_settle = None,
+            Some(_) => {
+                ctx.request_repaint_after(LOUPE_SETTLE);
+                return;
+            }
+            None => return,
+        }
+
+        let Some(document) = &self.document else {
+            return;
+        };
+
+        let zoom = self.viewport.zoom * MAGNIFY;
+        let half = f64::from(LOUPE) / 2.0 / zoom;
+        let region = Rect::new(
+            cursor.x - half,
+            cursor.y - half,
+            cursor.x + half,
+            cursor.y + half,
+        );
+
+        if let Ok(raster) =
+            document.render_region(self.page, region, zoom * f64::from(ctx.pixels_per_point()))
+        {
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [raster.width, raster.height],
+                &raster.rgba,
+            );
+
+            self.loupe = Some(Loupe {
+                texture: ctx.load_texture("loupe", image, egui::TextureOptions::LINEAR),
+                region: raster.region,
+                centred_on: cursor,
+            });
+        }
     }
 
     /// While editing, every anchor on the page is a target, and the selected
@@ -1221,6 +1638,8 @@ impl eframe::App for App {
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
 
         if self.document.is_some() && self.error.is_none() {
+            self.tool_strip(ui);
+            self.tool_groups(ui);
             self.measurements_panel(ui);
         }
 

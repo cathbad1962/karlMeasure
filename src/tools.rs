@@ -72,6 +72,16 @@ impl Pen {
     }
 }
 
+/// The nearest of `targets` within `radius` of `point`, which is where a
+/// placement lands instead of where the hand actually was.
+pub fn snap(point: Point, radius: f64, targets: impl Iterator<Item = Point>) -> Option<Point> {
+    targets
+        .map(|target| (target, (target - point).hypot()))
+        .filter(|(_, distance)| *distance <= radius)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(target, _)| target)
+}
+
 /// Which anchor of which measurement on the page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
@@ -92,6 +102,9 @@ pub enum Grab {
 pub struct Editor {
     pub selected: Option<Selection>,
     pub grabbed: Option<(Selection, Grab)>,
+    /// Where the grabbed anchor sat when the drag began, which is what an
+    /// orthogonal constraint holds it against.
+    pub origin: Option<Point>,
 }
 
 impl Editor {
@@ -340,6 +353,21 @@ mod tests {
     }
 
     #[test]
+    fn snapping_takes_the_nearest_target_in_reach() {
+        let targets = [
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(104.0, 3.0),
+        ];
+
+        assert_eq!(
+            snap(Point::new(101.0, 1.0), 5.0, targets.into_iter()),
+            Some(Point::new(100.0, 0.0))
+        );
+        assert_eq!(snap(Point::new(50.0, 50.0), 5.0, targets.into_iter()), None);
+    }
+
+    #[test]
     fn an_anchor_is_hit_within_the_radius_and_not_beyond_it() {
         let measurements = square();
         let editor = Editor::default();
@@ -367,7 +395,7 @@ mod tests {
 
         let selected = Editor {
             selected: Some(at(0, 0)),
-            grabbed: None,
+            ..Editor::default()
         };
         assert_eq!(
             selected.hit(&measurements, Point::new(20.0, 0.0), 5.0),
