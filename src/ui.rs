@@ -175,6 +175,11 @@ impl Input {
             let key = |key| !typing && i.key_pressed(key);
             let command = !typing && i.modifiers.command;
 
+            // A tool's letter is the lower case one. Shift makes a different
+            // binding, not the same one — `n` is Snap and `Shift+N` is not.
+            let plain = |k| key(k) && !i.modifiers.shift && !i.modifiers.command;
+            let shifted = |k| key(k) && i.modifiers.shift && !i.modifiers.command;
+
             Self {
                 page_up: key(egui::Key::PageUp),
                 page_down: key(egui::Key::PageDown),
@@ -182,26 +187,24 @@ impl Input {
                 delete: key(egui::Key::Delete) || key(egui::Key::Backspace),
                 undo: command && !i.modifiers.shift && key(egui::Key::Z),
                 redo: command && (key(egui::Key::Y) || (i.modifiers.shift && key(egui::Key::Z))),
-                tool: if i.modifiers.shift && i.modifiers.alt && key(egui::Key::C) {
+                tool: if shifted(egui::Key::C) && i.modifiers.alt {
                     Some(Tool::Calibrate)
-                } else if i.modifiers.shift && key(egui::Key::C) {
+                } else if shifted(egui::Key::C) {
                     Some(Tool::AnchorPoint)
-                } else if i.modifiers.shift {
-                    None
-                } else if key(egui::Key::V) {
+                } else if plain(egui::Key::V) {
                     Some(Tool::Select)
-                } else if key(egui::Key::A) {
+                } else if plain(egui::Key::A) {
                     Some(Tool::DirectSelect)
-                } else if key(egui::Key::P) {
+                } else if plain(egui::Key::P) {
                     Some(Tool::Pen)
-                } else if key(egui::Key::Plus) || key(egui::Key::Equals) {
+                } else if plain(egui::Key::Plus) || plain(egui::Key::Equals) {
                     Some(Tool::AddAnchor)
-                } else if key(egui::Key::Minus) {
+                } else if plain(egui::Key::Minus) {
                     Some(Tool::DeleteAnchor)
                 } else {
                     None
                 },
-                snap: key(egui::Key::N),
+                snap: plain(egui::Key::N),
                 scroll: i.smooth_scroll_delta.y as f64,
                 cursor: i.pointer.hover_pos(),
                 pressed_at: i.pointer.press_origin(),
@@ -605,24 +608,24 @@ impl App {
         // The tools that work, in the order and with the keys they carry in
         // the drawing applications this sits beside.
         const TOOLS: [(Tool, &str, &str); 6] = [
-            (Tool::Select, "V", "Selection (V)"),
-            (Tool::DirectSelect, "A", "Direct Selection (A)"),
-            (Tool::Pen, "P", "Pen (P)"),
-            (Tool::AnchorPoint, "C", "Anchor Point (Shift+C)"),
+            (Tool::Select, "v", "Selection (v)"),
+            (Tool::DirectSelect, "a", "Direct Selection (a)"),
+            (Tool::Pen, "p", "Pen (p)"),
+            (Tool::AnchorPoint, "⇧C", "Anchor Point (Shift+c)"),
             (Tool::AddAnchor, "+", "Add Anchor Point (+)"),
             (Tool::DeleteAnchor, "−", "Delete Anchor Point (−)"),
         ];
 
-        // Labels only. Nothing lies behind these; CLAUDE.md §2 says which are
-        // unbuilt and which are meant to stay dark.
+        // Labels only, holding letters for a later project. Nothing lies
+        // behind them; see CLAUDE.md §2.
         const PLACEHOLDERS: [(&str, &str); 7] = [
-            ("\\", "Line — not available"),
-            ("M", "Rectangle — not available"),
-            ("L", "Ellipse — not available"),
-            ("G", "Polygon — not available"),
-            ("Y", "Polyline — not available"),
-            ("T", "Type — not available"),
-            ("I", "Eyedropper — not available"),
+            ("\\", "Line — not in this project"),
+            ("m", "Rectangle — not in this project"),
+            ("l", "Ellipse — not in this project"),
+            ("⇧P", "Polygon — not in this project"),
+            ("⇧N", "Polyline — not in this project"),
+            ("t", "Type — not in this project"),
+            ("i", "Eyedropper — not in this project"),
         ];
 
         egui::Panel::left("tools")
@@ -662,7 +665,7 @@ impl App {
                 ui.add_space(6.0);
 
                 for (on, letter, name) in [
-                    (&mut self.assist.snap, "N", "Snap to anchors (N)"),
+                    (&mut self.assist.snap, "n", "Snap to anchors (n)"),
                     (&mut self.assist.magnifier, "◎", "Magnifier"),
                 ] {
                     let button = egui::Button::new(letter).selected(*on);

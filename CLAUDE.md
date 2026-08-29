@@ -54,20 +54,16 @@ There is no second frontend. There is no server. Do not write abstractions that
 anticipate one.
 
 **One exception, decided at slice 8.** The tool strip and the measurement panel
-carry disabled placeholder buttons, so their intended shape is visible while
-they are being built. They are labels and nothing else: no state, no tool, no
-code path reaches them, and no other code accounts for them. Do not grow this
-exception into a hook.
+carry disabled buttons for Line, Rectangle, Ellipse, Polygon, Polyline, Type,
+Eyedropper and Length, holding the layout a later, separate project is meant
+to fill in. They are labels and nothing else: no state, no tool, no code path
+reaches them, and no other code accounts for them.
 
-Two kinds sit there, and the difference matters:
-
-- **Not yet built, and in scope one day:** Rectangle, Ellipse, Polygon. These
-  are only quicker ways to draw an area, which is what this application is
-  for. Each needs a slice of its own.
-- **Out of scope, and expected to stay dark:** Line, Polyline, Length, Type,
-  Eyedropper. The first three are linear measurement, Type is annotation, and
-  Eyedropper implies styling. Lighting any of them up means changing the list
-  above first.
+Every one of them stays out of scope **for this project** and will not be
+wired up here. They are kept in the interface deliberately, so the shape of
+the palette is settled before anything grows into it. Do not grow this
+exception into a hook: reserving a letter is not the same as leaving a seam
+to build behind.
 
 ---
 
@@ -173,7 +169,9 @@ Each line is the definition of done for that session.
    toggle.
 8. Snapping to existing anchors; modifier-constrained orthogonal placement;
    magnifier under the cursor.
-9. Save and reload a project sidecar; export CSV.
+9. Save and reload a project sidecar; export CSV. Perimeter is reported
+   alongside area, in the list and in the export — §2 promises it and no
+   earlier slice delivered it.
 10. Packaging and buffer.
 
 Do not start a slice before the previous one has been run and accepted.
