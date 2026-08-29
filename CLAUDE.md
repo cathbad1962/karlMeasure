@@ -53,6 +53,13 @@ these:
 There is no second frontend. There is no server. Do not write abstractions that
 anticipate one.
 
+**One exception, decided at slice 8.** The measurement tool panel carries
+disabled placeholder buttons for Length and Polyline, so the panel's intended
+shape is visible while it is being built. They are labels and nothing else:
+no state, no tool, no code path reaches them, and no other code accounts for
+them. The tools themselves stay out of scope until they are given slices of
+their own. Do not grow this exception into a hook.
+
 ---
 
 ## 3. Architecture — decided
