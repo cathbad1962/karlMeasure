@@ -192,6 +192,7 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: 8 — not started.** Slice 7 is accepted: measurements are
-listed, named, coloured and hidden, and holes subtract by winding.
+**Current slice: 9 — not started.** Slice 8 is accepted: a tool palette,
+snapping, orthogonal placement and a magnifier, alongside a reworked interface
+— holes are editable and removable, and a hole takes off only what it covers.
 Update this line when a slice is accepted.
