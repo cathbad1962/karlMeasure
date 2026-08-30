@@ -30,22 +30,40 @@ accurate.
 
 ## 2. Scope
 
+Phase one is delivered and tagged `v0.1.0`: areas measured on a single
+calibrated drawing. Phase two builds a site take-off on that foundation. The
+list below is the whole of phase two; §6 says what order it is built in.
+
 **In scope**
 
-- Open a PDF, render a page, pan and zoom.
-- Calibrate the page to a real-world scale by picking two points and entering a
-  known distance.
-- Trace closed areas with a Bézier pen tool, and edit those paths afterwards.
-- Named measurements with holes, reported area and perimeter in real units.
-- Save to a JSON sidecar. Export measurements to CSV.
+- Everything phase one delivered: open a PDF, pan and zoom, calibrate, trace
+  and edit Bézier areas, holes, names and colours, area and perimeter in real
+  units, CSV export.
+- **A project holds several drawings**, saved as a project file that names
+  them, rather than a sidecar beside one of them.
+- **One site space.** Every outline is stored in real-world coordinates. A
+  drawing is placed into that space and is a window onto it, not the place the
+  geometry lives.
+- **Registering a sheet** against an already-placed one, by picking two points
+  common to both. The scale is inherited, and the mismatch left over is
+  reported rather than absorbed.
+- **Groups**: an area type, carrying an ordered build-up of layers with
+  thicknesses, tagged onto areas. Totals by group; areas named from the type
+  and their ordinal.
+- **Quantities**: the group's total area against each layer's thickness, the
+  lines a bill is made of, exported.
+- **Deduction by containment**, derived and reported gross, deducted and net.
+- **Checks**: a site boundary against the sum of net areas, and overlap within
+  a group. Both report; neither resolves.
 
 **Explicitly out of scope.** Do not build, scaffold, or leave hooks for any of
 these:
 
-- Linear or perimeter measurement as a separate tool
-- Count tools, layers, annotations, markup
-- Volumes, surfaces, elevations, cut/fill, 3D of any kind
-- Multi-page batch processing
+- Count tools, layers as a drawing concept, annotations, markup
+- Surfaces, cut/fill, or 3D of any kind. Volume here is plan area against a
+  layer thickness, and nothing more.
+- Pricing, rates, or anything that turns a quantity into money
+- Batch or unattended processing
 - Any form of plugin system, scripting, or extension point
 - Any network, sync, licensing, or telemetry feature
 - Any alternative UI backend or FFI boundary
@@ -87,10 +105,19 @@ to build behind.
   `embed-resource` was added at slice 10, as the one build-dependency: the icon
   on the executable is a Windows resource compiled into the file, and nothing
   in the language puts one there. It builds the icon in; none of it ships.
-- **All geometry is stored in PDF page space (points).** Never store screen
-  pixels. Screen position is always derived:
-  `screen = page * viewport.zoom + viewport.pan`.
-- **Calibration is real-world units per PDF point**, stored per page.
+- **All geometry is stored in site space**, in real-world units, from phase two
+  onwards. Never store screen pixels, and never store page points: a drawing is
+  a window onto the measure, not the place it lives. Screen position is derived
+  in two steps — `page = placement⁻¹(site)`, then
+  `screen = page * viewport.zoom + viewport.pan` — so re-registering a sheet
+  moves the window and never the work.
+- **A drawing's placement is a similarity transform** from its page points into
+  site space: uniform scale, rotation, translation. Nothing else. A sheet that
+  needs shearing to fit is a sheet that is wrong, and it should be said so
+  rather than accommodated.
+- **Calibration is real-world units per PDF point**, per sheet, and it is what
+  establishes the first placement. A sheet registered against a placed one
+  inherits that scale.
 - **`kurbo` types are the internal vocabulary** (`Point`, `Vec2`, `BezPath`).
   Convert to `egui` types only at the paint call.
 - **Render the visible viewport only**, never the full page — a full-size sheet
@@ -248,6 +275,33 @@ hand, by punching a hole where the inner area sits.
 
 Each line is the definition of done for that session.
 
+### Phase two
+
+1. A project holds more than one drawing: add a second, see both listed, switch
+   between them, save a project file that names them and reopen it. A phase-one
+   sidecar comes in as a one-drawing project.
+2. Geometry moves into site space. Calibrating a sheet places it; outlines are
+   stored in real-world coordinates and the drawing becomes a window onto them.
+   Nothing on screen changes — that is the check — but the file holds one
+   measure rather than one per page.
+3. Register a sheet against a placed one by picking two common points. It
+   lands, the scale is inherited, and the residual is reported. Areas traced on
+   either sheet are one measure, and the export is one list.
+4. Areas show through: one traced on a neighbouring sheet appears where it
+   falls on this one, so a matchline reads as continuous.
+5. Groups exist: name a type, assign areas to it, see the list two-level with a
+   total per group. Areas take their name from the type and their ordinal.
+6. A group carries an ordered build-up: layers with thicknesses, and the level
+   reduction they sum to.
+7. Quantities: the group's total against each layer, one line apiece.
+8. Deduction by containment: gross, deducted and net, derived rather than
+   stored.
+9. Export the quantities alongside the areas.
+10. The checks: a site boundary against the sum of net areas, and overlap
+    within a group. Both report; neither resolves.
+
+### Phase one, delivered and tagged `v0.1.0`
+
 1. A PDF opens and a page is visible in a window.
 2. The page pans and zooms smoothly; page navigation works. The scroll wheel
    zooms about the cursor; holding the wheel button down and dragging pans.
@@ -270,7 +324,8 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: none — all ten are accepted.** Slice 10 closed them out:
+**Current slice: phase two, 1 — not started.** Phase one is accepted whole and
+tagged `v0.1.0`. Slice 10 closed it out:
 `scripts\package.ps1` builds a folder that runs on a machine with nothing
 installed — the executable, the library it loads, and the notices both carry —
 and zips it. The mark on the window and on the executable is drawn at build
