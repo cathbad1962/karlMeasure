@@ -167,6 +167,31 @@ Nothing here anticipates it — no field, no hook, no seam. The sidecar gains th
 field with `#[serde(default)]` when it exists, and reads today's files as
 ungrouped work.
 
+Naming follows from that. A type is named once — "concrete footpath" — and each
+new area of it is the next one: concrete footpath 1, 2, 3. Four points for
+whoever builds it:
+
+- **Store the ordinal, derive the name shown.** A member holds its number and
+  no name of its own; what is displayed is the group's name and that number, so
+  renaming the type renames every member at once. Materialising the string
+  instead leaves five members called "concrete footpath 3" after the type is
+  renamed, and nothing says so. A typed name overrides both, for when a place
+  reads better than a number. Today's `name: String` becomes `Option<String>`,
+  and every sidecar written before groups reads back as a typed name — which is
+  right, since those names were typed.
+- **Groups live at project level, not per page.** A site spans sheets, so the
+  numbering carries across them and the total sums across them. Filing groups
+  under a page is the mistake to avoid.
+- **The next ordinal comes from a counter on the group**, not from counting its
+  members, or deleting one makes the next area reuse a number.
+- **Ordinals never renumber.** A deleted member leaves a gap; numbers keep
+  pointing at what they pointed at, which is what a checked report needs.
+
+Today's naming has the same flaw in miniature: a new outline is called
+`Area {count + 1}`, so deleting one and tracing another repeats a number. It is
+left alone deliberately — the fix is the group's counter, and the group does
+not exist here.
+
 **How areas relate to one another: intent, not built here.** Areas partition
 the site. They do not overlap, they leave no gaps, and their areas sum to the
 site's. A build-up is vertical — one area carries several material layers over
