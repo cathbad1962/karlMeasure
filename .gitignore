@@ -1,4 +1,5 @@
 /target
+/dist
 
 # Real drawings carry identifying title blocks — never commit them.
 *.pdf
@@ -8,3 +9,7 @@ samples/
 # problem in a smaller file. Exports likewise.
 *.measurements.json
 *.csv
+
+# The PDFium library and the licence beside it are fetched, not built here.
+/runtime
+*.dll

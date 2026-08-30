@@ -84,6 +84,9 @@ to build behind.
   was added at slice 8 for one job only: the area a hole and its outline have
   in common. Boolean geometry is a well-known source of quiet wrongness and
   this is a measuring tool, so it is not hand-rolled.
+  `embed-resource` was added at slice 10, as the one build-dependency: the icon
+  on the executable is a Windows resource compiled into the file, and nothing
+  in the language puts one there. It builds the icon in; none of it ships.
 - **All geometry is stored in PDF page space (points).** Never store screen
   pixels. Screen position is always derived:
   `screen = page * viewport.zoom + viewport.pan`.
@@ -99,7 +102,11 @@ to build behind.
   `default-features = false` so it pulls in no image-decoding dependency;
   bitmaps are normalised to RGBA by the binding, which needs no image feature.
   Do not swap channels by hand — the binding already reverses its own byte
-  order. Revisit static linking at slice 10 if a single-file binary is wanted.
+  order. Static linking was weighed at slice 10 and refused: there is no source
+  build to link against, so a static library means building PDFium with its own
+  toolchain and keeping that matched to the compiler — a standing burden, to
+  save one file in a folder. The library ships beside the executable, which is
+  where the loader looks first anyway.
 - **Areas are computed analytically** via `kurbo`'s signed area. Do not flatten
   curves to compute area; flattening is for rendering and hit-testing only.
   One exception, decided at slice 8: a hole is only allowed to take off the

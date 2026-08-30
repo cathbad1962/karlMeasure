@@ -7,11 +7,22 @@ mod viewport;
 
 use eframe::egui;
 
+/// The mark, drawn at build time and carried in the binary: see `build.rs`.
+const ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon.rgba"));
+
 fn main() -> eframe::Result {
+    let side = (ICON.len() as f64 / 4.0).sqrt() as u32;
+    let icon = egui::IconData {
+        rgba: ICON.to_vec(),
+        width: side,
+        height: side,
+    };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 800.0])
-            .with_title("Measure"),
+            .with_title("Measure")
+            .with_icon(icon),
         ..Default::default()
     };
 
