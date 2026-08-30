@@ -84,6 +84,13 @@ reason: it holds the space for a later project's tool groups. No shortcut may pa
 `C`, `X` or `V`: the window layer turns those into clipboard events and returns
 before a key event exists, so they cannot reach this application at all.
 
+**Existing and Proposed** are reserved the same way, in the strip along the
+bottom. Everything measured here is proposed work, so Proposed is shown as the
+one in hand and Existing is a disabled label: no state, no second set of
+measurements, no field on anything. It is there so that the interface has the
+shape it will need, and so that nobody reads the absence of the distinction as
+a decision that there isn't one. What it will mean when it is built is in §4.
+
 Every one of them stays out of scope **for this project** and will not be
 wired up here. They are kept in the interface deliberately, so the shape of
 the palette is settled before anything grows into it. Do not grow this
@@ -250,6 +257,16 @@ overlap.
 None of this is built here, and none of it may be resolved silently: an area
 lying inside another does not reduce it today, and the deduction is made by
 hand, by punching a hole where the inner area sits.
+
+**Existing and Proposed: intent, not built here.** A site carries two take-offs
+over the same drawings — what is there now, and what is to be built — and they
+answer different questions: existing work is measured to be removed or worked
+around, proposed work to be constructed. They are not drawing layers and must
+not become them. When it is built, the distinction belongs to the measurement
+(or to the group it is tagged with), because one drawing carries both and the
+strip along the bottom says which one is being added to and shown. Everything
+in §4 above then holds twice over: areas partition the site once as existing
+and once as proposed, and the two are never summed together.
 
 ---
 

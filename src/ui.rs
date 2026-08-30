@@ -69,6 +69,10 @@ const SNAPPED: egui::Color32 = egui::Color32::from_rgb(255, 0, 160);
 /// How wide the panels start out.
 const PANEL_WIDTH: f32 = 320.0;
 
+/// The most of the window either side column may take, as a fraction of what
+/// is left after the tool strip. The canvas keeps the rest whatever happens.
+const COLUMN_SHARE: f32 = 0.3;
+
 /// The side of the magnifier, in logical points on screen.
 const LOUPE: f32 = 150.0;
 
@@ -1286,6 +1290,11 @@ impl App {
             PANEL_WIDTH
         };
 
+        // Whatever the other side does, this column never takes so much that
+        // there is nothing left to draw on: the drawing is the point of the
+        // window, and an empty column held for a later project is not.
+        let width = width.min(ui.available_width() * COLUMN_SHARE);
+
         egui::Panel::left("tool_groups")
             .exact_size(width)
             .resizable(false)
@@ -1480,75 +1489,92 @@ impl App {
 
     /// The list of what has been measured on this page, and everything that
     /// can be done to a measurement as a whole.
-    /// The drawings the project holds, the one on screen picked out. A drawing
-    /// whose file could not be opened keeps its place and says so: the work
-    /// filed under it is still in the project, and still in the export.
-    fn drawings_list(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.heading("Drawings");
-        ui.add_space(4.0);
+    /// The strip along the bottom: which take-off is being measured, and which
+    /// drawing it is being measured on. One line, so that the panel opposite
+    /// is for measurements and nothing else.
+    fn bottom_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("drawings")
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // A label and nothing else, held for a later slice: every area
+                    // measured here is proposed work. Nothing reaches this but the
+                    // eye; see CLAUDE.md §2.
+                    ui.add_enabled(false, egui::Button::new("Existing"))
+                        .on_disabled_hover_text(
+                            "Existing work is not measured in this project yet",
+                        );
+                    ui.add(egui::Button::new("Proposed").selected(true))
+                        .on_hover_text("Everything measured here is proposed work");
 
-        let mut go_to = None;
+                    ui.separator();
 
-        for (index, drawing) in self.project.drawings.iter().enumerate() {
-            let opened = self.documents.get(index).is_some_and(Option::is_some);
-            let current = index == self.current.drawing;
+                    let count = self.project.drawings.len();
+                    let current = self.current.drawing;
+                    let mut go_to = None;
 
-            // How much of the project stands behind this drawing, so a list of
-            // sheet names is also a list of where the work is.
-            let measured: usize = self
-                .project
-                .measurements
-                .iter()
-                .filter(|(sheet, _)| sheet.drawing == index)
-                .map(|(_, measurements)| measurements.len())
-                .sum();
+                    // Cycling, rather than stopping at the ends: a set of sheets
+                    // has no first or last that means anything.
+                    let step = |by: usize| (current + by) % count.max(1);
 
-            ui.horizontal(|ui| {
-                let label = egui::Button::new(drawing.name())
-                    .selected(current)
-                    .min_size(egui::vec2(150.0, 0.0));
+                    if ui
+                        .add_enabled(count > 1, egui::Button::new("◀"))
+                        .on_hover_text("The drawing before this one")
+                        .clicked()
+                    {
+                        go_to = Some(step(count.saturating_sub(1)));
+                    }
 
-                if ui
-                    .add_enabled(opened, label)
-                    .on_hover_text(drawing.path.display().to_string())
-                    .on_disabled_hover_text(format!(
-                        "{} could not be opened",
-                        drawing.path.display()
-                    ))
-                    .clicked()
-                {
-                    go_to = Some(index);
-                }
+                    match self.project.drawings.get(current) {
+                        Some(drawing) => {
+                            let opened = self.documents.get(current).is_some_and(Option::is_some);
 
-                if !opened {
-                    ui.colored_label(ui.visuals().error_fg_color, "missing");
-                } else if measured > 0 {
-                    ui.weak(format!(
-                        "{measured} area{}",
-                        if measured == 1 { "" } else { "s" }
-                    ));
-                }
+                            ui.label(format!("{} of {count}", current + 1));
+                            ui.add(
+                                egui::Label::new(drawing.name())
+                                    .truncate()
+                                    .selectable(false),
+                            )
+                            .on_hover_text(drawing.path.display().to_string());
+
+                            if !opened {
+                                ui.colored_label(
+                                    ui.visuals().error_fg_color,
+                                    "· could not be opened",
+                                );
+                            }
+                        }
+                        None => {
+                            ui.weak("No drawing");
+                        }
+                    }
+
+                    if ui
+                        .add_enabled(count > 1, egui::Button::new("▶"))
+                        .on_hover_text("The drawing after this one")
+                        .clicked()
+                    {
+                        go_to = Some(step(1));
+                    }
+
+                    if let Some(index) = go_to
+                        && index != current
+                        && let Err(message) = self.show_sheet(Sheet::new(index, 0))
+                    {
+                        self.complain(message);
+                    }
+                });
             });
-        }
-
-        if let Some(index) = go_to
-            && index != self.current.drawing
-            && let Err(message) = self.show_sheet(Sheet::new(index, 0))
-        {
-            self.complain(message);
-        }
-
-        ui.add_space(4.0);
-        ui.separator();
     }
 
     fn measurements_panel(&mut self, ui: &mut egui::Ui) {
+        // Capped as well as defaulted: a panel takes its width from the last
+        // frame's content, so anything in it that asks for more than it has
+        // widens it again the next frame, and again after that.
         let panel = egui::Panel::right("measurements")
             .default_size(PANEL_WIDTH)
+            .max_size((ui.available_width() * COLUMN_SHARE).max(PANEL_WIDTH))
             .show(ui, |ui| {
-                self.drawings_list(ui);
-
                 ui.add_space(4.0);
                 ui.heading("Measurements");
                 ui.add_space(4.0);
@@ -2736,6 +2762,9 @@ impl eframe::App for App {
         let open = !self.project.drawings.is_empty();
 
         if open && self.error.is_none() {
+            // The bottom strip spans the window, so it is claimed before the
+            // columns either side of the canvas.
+            self.bottom_bar(ui);
             self.tool_strip(ui);
             self.tool_groups(ui);
             self.measurements_panel(ui);
