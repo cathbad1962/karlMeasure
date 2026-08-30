@@ -213,9 +213,11 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: 10 — not started.** Slice 9 is accepted: a project saves to a
-JSON sidecar beside its drawing and comes back with it, measurements export to
-CSV, and perimeter is reported alongside area. The commands that act on the
-project as a whole sit in a File menu, and closing — the project or the window
-— asks about unsaved work first.
+**Current slice: 10 — the buffer is spent, packaging remains.** Slice 9 is
+accepted: a project saves to a JSON sidecar beside its drawing and comes back
+with it, measurements export to CSV, and perimeter is reported alongside area.
+The commands that act on the project as a whole sit in a File menu, and
+closing — the project or the window — asks about unsaved work first. The
+buffer went on one notion of what is in hand, described in §4, and that is
+accepted too.
 Update this line when a slice is accepted.
