@@ -192,8 +192,9 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: 9 — written, awaiting a run.** Slice 8 is accepted: a tool
-palette, snapping, orthogonal placement and a magnifier, alongside a reworked
-interface — holes are editable and removable, and a hole takes off only what it
-covers.
+**Current slice: 10 — not started.** Slice 9 is accepted: a project saves to a
+JSON sidecar beside its drawing and comes back with it, measurements export to
+CSV, and perimeter is reported alongside area. The commands that act on the
+project as a whole sit in a File menu, and closing — the project or the window
+— asks about unsaved work first.
 Update this line when a slice is accepted.
