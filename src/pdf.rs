@@ -26,7 +26,7 @@ fn library_path() -> PathBuf {
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    PathBuf::from(Pdfium::pdfium_platform_library_name_at_path(&dir))
+    Pdfium::pdfium_platform_library_name_at_path(&dir)
 }
 
 /// Binds to PDFium once per process, preferring a copy next to the executable
