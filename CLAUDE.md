@@ -44,9 +44,17 @@ list below is the whole of phase two; §6 says what order it is built in.
 - **One site space.** Every outline is stored in real-world coordinates. A
   drawing is placed into that space and is a window onto it, not the place the
   geometry lives.
-- **Registering a sheet** against an already-placed one, by picking two points
-  common to both. The scale is inherited, and the mismatch left over is
-  reported rather than absorbed.
+- **Reference points**: placed by a tool of their own on any drawing that has
+  been placed, drawn as a target — two concentric circles, a crosshair, the
+  quadrants alternating light and dark — and labelled. A number is the default
+  label so that no point is nameless, but a said thing ("boundary corner sw")
+  is what a person should give it.
+- **Registering a sheet** against an already-placed one, by identifying two of
+  its reference points on the incoming drawing. Two is what the registration
+  needs; a drawing may carry as many as are useful. The scale is inherited, and
+  the mismatch left over is reported rather than absorbed. **Only the first
+  drawing is ever calibrated**: every other sheet derives its placement from a
+  sheet already placed, or it is not placed at all.
 - **Groups**: an area type, carrying an ordered build-up of layers with
   thicknesses, tagged onto areas. Totals by group; areas named from the type
   and their ordinal.
@@ -79,10 +87,15 @@ reaches them, and no other code accounts for them.
 
 Shortcuts are reserved the same way. `Shift+Alt+C` is held for a format
 painter, and `Shift+Alt+L` for Length, and neither may be bound to anything
-else. The second column of the interface is deliberately empty for the same
-reason: it holds the space for a later project's tool groups. No shortcut may pair Ctrl with
-`C`, `X` or `V`: the window layer turns those into clipboard events and returns
-before a key event exists, so they cannot reach this application at all.
+else. No shortcut may pair Ctrl with `C`, `X` or `V`: the window layer turns
+those into clipboard events and returns before a key event exists, so they
+cannot reach this application at all. `x` is the reference point tool, from
+slice 3 on — x marks the spot.
+
+**The second column is no longer empty.** It held the space for a later
+project's tool groups; from slice 4 it carries a **Takeoff** tab, and the first
+thing in it is *Import Digital Plan using Matchlines*. The reservation stood
+while there was nothing to put there. There is now.
 
 **Existing and Proposed** are reserved the same way, in the strip along the
 bottom. Everything measured here is proposed work, so Proposed is shown as the
@@ -297,24 +310,30 @@ Each line is the definition of done for that session.
 1. A project holds more than one drawing: add a second, see both listed, switch
    between them, save a project file that names them and reopen it. A phase-one
    sidecar comes in as a one-drawing project.
-2. Geometry moves into site space. Calibrating a sheet places it; outlines are
-   stored in real-world coordinates and the drawing becomes a window onto them.
-   Nothing on screen changes — that is the check — but the file holds one
-   measure rather than one per page.
-3. Register a sheet against a placed one by picking two common points. It
-   lands, the scale is inherited, and the residual is reported. Areas traced on
-   either sheet are one measure, and the export is one list.
-4. Areas show through: one traced on a neighbouring sheet appears where it
-   falls on this one, so a matchline reads as continuous.
-5. Groups exist: name a type, assign areas to it, see the list two-level with a
+2. Geometry moves into site space, in millimetres. Calibrating the first
+   drawing places it; outlines are stored in real-world coordinates and a
+   drawing becomes a window onto them. Nothing on screen changes and no number
+   moves — that is the check — but the file holds one measure rather than one
+   per page.
+3. Reference points: the `x` tool, the target symbol, a label with a number as
+   its default, saved and reloaded, placeable on any placed drawing.
+4. *Import Digital Plan using Matchlines*, from the Takeoff tab in the second
+   column: refused until the placed drawing carries two reference points, then
+   each is identified in turn on the incoming drawing, which lands placed with
+   its scale reported. Calibration is offered only while nothing is placed:
+   from here a second drawing is registered, never calibrated.
+5. Areas and reference points show through: work on a neighbouring sheet
+   appears where it falls on this one, so a matchline reads as continuous and
+   a registration can be seen to be right.
+6. Groups exist: name a type, assign areas to it, see the list two-level with a
    total per group. Areas take their name from the type and their ordinal.
-6. A group carries an ordered build-up: layers with thicknesses, and the level
+7. A group carries an ordered build-up: layers with thicknesses, and the level
    reduction they sum to.
-7. Quantities: the group's total against each layer, one line apiece.
-8. Deduction by containment: gross, deducted and net, derived rather than
+8. Quantities: the group's total against each layer, one line apiece.
+9. Deduction by containment: gross, deducted and net, derived rather than
    stored.
-9. Export the quantities alongside the areas.
-10. The checks: a site boundary against the sum of net areas, and overlap
+10. Export the quantities alongside the areas.
+11. The checks: a site boundary against the sum of net areas, and overlap
     within a group. Both report; neither resolves.
 
 ### Phase one, delivered and tagged `v0.1.0`
@@ -341,17 +360,27 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: phase two, 1 — not started.** Phase one is accepted whole and
-tagged `v0.1.0`. Slice 10 closed it out:
-`scripts\package.ps1` builds a folder that runs on a machine with nothing
-installed — the executable, the library it loads, and the notices both carry —
-and zips it. The mark on the window and on the executable is drawn at build
-time from four coordinates rather than decoded from a file. The notices are
-generated from the dependency graph by `scripts\notices.ps1`, so keeping them
-accurate is one command. A released build is a window and nothing else.
+**Current slice: phase two, 2 — agreed, not started.** Phase two, slice 1 is
+accepted: a project holds several drawings, saved as a project file that names
+them relative to itself, with a phase-one sidecar opening as a one-drawing
+project. The drawings are cycled through in the strip along the bottom, which
+also carries the Existing and Proposed labels; the panel opposite is for
+measurements alone.
 
-The next piece of work starts by agreeing what it is and what finishing it
-looks like, the same way each slice did. §4 records three decisions made for
-work that belongs elsewhere — grouping, how areas relate to one another, and
-how a type's areas are named — none of which is built here.
+Slice 2 is agreed and its check written. When it is done:
+
+1. On a single drawing everything behaves as it does today — calibrate, trace,
+   edit, holes, undo, snapping, the magnifier — and **the areas and perimeters
+   read the same numbers as before**. That is the check; the rest is bookkeeping
+   underneath it.
+2. The project file holds outlines in millimetres of site space, and each
+   calibrated sheet carries its placement: scale, rotation, translation.
+3. An existing project file opens and converts, its page-space work placed
+   through each sheet's own calibration, and the numbers come out where they
+   went in.
+4. A sheet with no scale still cannot be traced on, now for a structural
+   reason: there is no placement to put its geometry into site space through.
+
+Calibrating a second drawing independently is still possible and still wrong.
+It goes at slice 4, when a second drawing is registered rather than calibrated.
 Update this line when a slice is accepted.

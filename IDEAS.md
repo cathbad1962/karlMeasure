@@ -10,6 +10,16 @@ not here.
 
 ## Raised and not scheduled
 
+- **Deriving a registered sheet's scale rather than inheriting it.** Two
+  reference points identified on an incoming drawing would give its scale as
+  well as its position. The decision stands at inherit-and-report, which is
+  right for a set plotted at one scale and wrong for a sheet genuinely plotted
+  at another — a detail at 1:200 in a 1:500 set would register visibly off.
+  Worth revisiting the first time a set arrives at mixed scales.
+- **Picking a drawing from a list rather than cycling.** The strip along the
+  bottom steps one at a time, which is fine for a handful and tiresome for
+  forty.
+
 - **Vector extraction from the PDF.** PDFium can hand back path segments, so an
   outline could be traced from the drawing's own geometry rather than by hand.
   Deliberately unbuilt; the hand-traced path is the one that gets checked.
