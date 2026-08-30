@@ -1,12 +1,12 @@
 //! The application window: open a drawing, pan and zoom it, step through pages.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use kurbo::{Point, Rect, Shape, Size, Vec2};
 
-use crate::doc::{self, Anchor, Calibration, Measurement, Outline, Project, SubPath, Unit};
+use crate::doc::{self, Anchor, Calibration, Measurement, Outline, Project, Sheet, SubPath, Unit};
 use crate::geom;
 use crate::pdf;
 use crate::tools::{self, Editor, Grab, Pen};
@@ -185,7 +185,7 @@ struct Loupe {
 /// What the current texture holds, and where it sits on the page.
 struct Rendered {
     texture: egui::TextureHandle,
-    page: usize,
+    sheet: Sheet,
     region: Rect,
 }
 
@@ -325,10 +325,15 @@ struct Entry {
 
 #[derive(Default)]
 pub struct App {
-    document: Option<pdf::Document>,
-    /// The drawing on screen, which is where its sidecar is kept.
-    drawing: Option<PathBuf>,
-    page: usize,
+    /// One per drawing in the project, in step with it. A drawing whose file
+    /// could not be opened keeps its place in the list and says so, rather
+    /// than taking the work filed under it down with it.
+    documents: Vec<Option<pdf::Document>>,
+    /// Where the project was last saved, and where Save writes.
+    project_path: Option<PathBuf>,
+    /// The sheet on screen: which drawing, and which of its pages.
+    current: Sheet,
+    /// The pages of the drawing on screen.
     page_count: usize,
     page_size: Size,
     viewport: Viewport,
@@ -395,7 +400,106 @@ pub struct App {
 }
 
 impl App {
+    /// Opens a drawing or a project, whichever was picked.
     fn open_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Drawing or project", &["pdf", "json"])
+            .add_filter("PDF drawing", &["pdf"])
+            .add_filter("Project", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+
+        self.close();
+
+        // A drawing opens as a project of its own; anything else is read as a
+        // project file naming the drawings it was measured on.
+        let opened = if path
+            .extension()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("pdf"))
+        {
+            self.open_drawing(&path)
+        } else {
+            self.open_project(&path)
+        };
+
+        if let Err(message) = opened {
+            self.error = Some(message);
+        }
+    }
+
+    /// A drawing on its own: the project beside it if there is one, and a
+    /// project of that one drawing if there is not.
+    fn open_drawing(&mut self, path: &Path) -> Result<(), String> {
+        let project = doc::project_path(path);
+        let sidecar = doc::sidecar_path(path);
+
+        // A project file first, then phase one's sidecar, then nothing: work
+        // done on this drawing before comes back with it.
+        let found = if project.exists() {
+            Some(project.clone())
+        } else if sidecar.exists() {
+            Some(sidecar)
+        } else {
+            None
+        };
+
+        match found {
+            Some(file) => match doc::load(&file) {
+                Ok(project) => {
+                    self.project = project;
+                    self.report(format!("Reopened {}", doc::file_name(&file)));
+                }
+                // A project that cannot be read is worth saying so about, but
+                // not worth withholding the drawing over.
+                Err(message) => {
+                    self.project = Project::of(path);
+                    self.complain(message);
+                }
+            },
+            None => self.project = Project::of(path),
+        }
+
+        // Saving goes to the project file's name whether one was read or not,
+        // so phase one's sidecar is left as it was found.
+        self.project_path = Some(project);
+
+        self.reopen_drawings();
+        self.show_sheet(Sheet::default())
+    }
+
+    /// A project file: the drawings it names, opened where it says they are.
+    fn open_project(&mut self, path: &Path) -> Result<(), String> {
+        self.project = doc::load(path)?;
+        self.project_path = Some(path.to_path_buf());
+        self.reopen_drawings();
+
+        let missing = self.documents.iter().filter(|open| open.is_none()).count();
+        if missing > 0 {
+            self.complain(format!(
+                "{missing} of this project's drawings could not be opened"
+            ));
+        } else {
+            self.report(format!("Opened {}", doc::file_name(path)));
+        }
+
+        self.show_sheet(Sheet::default())
+    }
+
+    /// Opens every drawing the project names, keeping a place in the list for
+    /// any that cannot be opened.
+    fn reopen_drawings(&mut self) {
+        self.documents = self
+            .project
+            .drawings
+            .iter()
+            .map(|drawing| pdf::Document::open(&drawing.path).ok())
+            .collect();
+    }
+
+    /// Adds another drawing to the project and moves to it.
+    fn add_drawing_dialog(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("PDF drawing", &["pdf"])
             .pick_file()
@@ -403,56 +507,31 @@ impl App {
             return;
         };
 
-        self.rendered = None;
-        self.resettle_at = None;
-        self.project = Project::default();
-        self.unsaved = false;
-        self.notice = None;
-        self.undo.clear();
-        self.redo.clear();
-        self.take_up(Tool::Select);
-
         match pdf::Document::open(&path) {
             Ok(document) => {
-                self.error = None;
-                self.page_count = document.page_count();
-                self.document = Some(document);
-                self.drawing = Some(path.clone());
+                self.commit();
+                self.project.drawings.push(doc::Drawing { path });
+                self.documents.push(Some(document));
 
-                // Work already done on this drawing comes back with it. A
-                // sidecar that cannot be read is worth saying so about, but
-                // not worth withholding the drawing over.
-                match doc::load(&path) {
-                    Ok(Some(project)) => {
-                        self.project = project;
-                        self.report(format!(
-                            "Reopened {}",
-                            doc::file_name(&doc::sidecar_path(&path))
-                        ));
-                    }
-                    Ok(None) => {}
-                    Err(message) => self.complain(message),
+                let added = self.project.drawings.len() - 1;
+                if let Err(message) = self.show_sheet(Sheet::new(added, 0)) {
+                    self.complain(message);
                 }
-
-                self.show_page(0);
             }
-            Err(message) => {
-                self.document = None;
-                self.drawing = None;
-                self.page_count = 0;
-                self.error = Some(message);
-            }
+            Err(message) => self.complain(message),
         }
     }
 
-    /// Writes the project to its sidecar, beside the drawing.
+    /// Writes the project where it was last written, asking where that should
+    /// be only if it has never been written at all.
     fn save(&mut self) {
-        let Some(drawing) = self.drawing.clone() else {
+        let Some(path) = self.project_path.clone() else {
+            self.save_as_dialog();
             return;
         };
 
-        match doc::save(&self.project, &drawing) {
-            Ok(path) => {
+        match doc::save(&self.project, &path) {
+            Ok(()) => {
                 self.unsaved = false;
                 self.report(format!("Saved {}", doc::file_name(&path)));
             }
@@ -460,20 +539,43 @@ impl App {
         }
     }
 
-    /// Asks where the CSV should go, and writes it there.
-    fn export_dialog(&mut self) {
-        let Some(drawing) = self.drawing.clone() else {
+    /// Asks where the project should go, and writes it there from now on.
+    fn save_as_dialog(&mut self) {
+        if self.project.drawings.is_empty() {
+            return;
+        }
+
+        let suggested = self
+            .project_path
+            .clone()
+            .unwrap_or_else(|| doc::project_path(&self.project.drawings[0].path));
+
+        let Some(path) = self.dialog_at(&suggested, "Project", &["json"]).save_file() else {
             return;
         };
 
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter("Comma separated values", &["csv"])
-            .set_file_name(doc::file_name(&drawing.with_extension("csv")));
+        self.project_path = Some(path);
+        self.save();
+    }
 
-        // The drawing's own folder is the likeliest place for the export.
-        if let Some(folder) = drawing.parent() {
-            dialog = dialog.set_directory(folder);
-        }
+    /// Asks where the CSV should go, and writes it there.
+    fn export_dialog(&mut self) {
+        let Some(drawing) = self
+            .project
+            .drawings
+            .first()
+            .map(|first| first.path.clone())
+        else {
+            return;
+        };
+
+        let suggested = self
+            .project_path
+            .clone()
+            .unwrap_or(drawing)
+            .with_extension("csv");
+
+        let dialog = self.dialog_at(&suggested, "Comma separated values", &["csv"]);
 
         let Some(path) = dialog.save_file() else {
             return;
@@ -582,6 +684,20 @@ impl App {
         }
     }
 
+    /// A save dialog opening where the suggested file would go, under the name
+    /// it would take.
+    fn dialog_at(&self, suggested: &Path, kind: &str, extensions: &[&str]) -> rfd::FileDialog {
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter(kind, extensions)
+            .set_file_name(doc::file_name(suggested));
+
+        if let Some(folder) = suggested.parent() {
+            dialog = dialog.set_directory(folder);
+        }
+
+        dialog
+    }
+
     fn report(&mut self, text: String) {
         self.notice = Some(Notice {
             text,
@@ -596,42 +712,56 @@ impl App {
         });
     }
 
-    /// Moves to `index`, fitted to the window.
-    fn show_page(&mut self, index: usize) {
+    /// The document behind the sheet on screen, if its file opened.
+    fn document(&self) -> Option<&pdf::Document> {
+        self.documents.get(self.current.drawing)?.as_ref()
+    }
+
+    /// Moves to `sheet`, fitted to the window.
+    fn show_sheet(&mut self, sheet: Sheet) -> Result<(), String> {
         // A span belongs to the page it was picked on; abandon a half-finished
-        // one rather than carrying its first end to another page.
+        // one rather than carrying its first end to another sheet.
         self.cancel_pick();
 
-        let Some(document) = &self.document else {
-            return;
+        let Some(Some(document)) = self.documents.get(sheet.drawing) else {
+            return Err(match self.project.drawings.get(sheet.drawing) {
+                Some(drawing) => format!("{} could not be opened", doc::file_name(&drawing.path)),
+                None => "That drawing is not in this project".to_owned(),
+            });
         };
 
-        match document.page_size(index) {
-            Ok(size) => {
-                self.page = index;
-                self.page_size = size;
-                self.refit = true;
-                self.rendered = None;
-                self.resettle_at = None;
+        let size = document.page_size(sheet.page)?;
 
-                // An outline belongs to the page it was traced on, and there
-                // is nothing to trace on a page with no scale. What was in
-                // hand, and the measurement a hole was going to go into,
-                // index one page's measurements and mean nothing on another.
-                self.let_go();
-                self.renaming = None;
-                self.loupe = None;
+        self.current = sheet;
+        self.page_count = document.page_count();
+        self.page_size = size;
+        self.refit = true;
+        self.rendered = None;
+        self.resettle_at = None;
 
-                if self.tool == Tool::Pen && !self.project.calibrations.contains_key(&index) {
-                    self.take_up(Tool::Select);
-                } else {
-                    self.take_up(self.tool);
-                }
-            }
-            Err(message) => {
-                self.document = None;
-                self.error = Some(message);
-            }
+        // An outline belongs to the sheet it was traced on, and there is
+        // nothing to trace on a sheet with no scale. What was in hand, and the
+        // measurement a hole was going to go into, index one sheet's
+        // measurements and mean nothing on another.
+        self.let_go();
+        self.renaming = None;
+        self.loupe = None;
+
+        if self.tool == Tool::Pen && !self.project.calibrations.contains_key(&sheet) {
+            self.take_up(Tool::Select);
+        } else {
+            self.take_up(self.tool);
+        }
+
+        Ok(())
+    }
+
+    /// Moves to another page of the drawing on screen.
+    fn show_page(&mut self, page: usize) {
+        let sheet = Sheet::new(self.current.drawing, page);
+
+        if let Err(message) = self.show_sheet(sheet) {
+            self.complain(message);
         }
     }
 
@@ -684,7 +814,7 @@ impl App {
     /// snapshot only if the change reports it did something.
     fn edit<T>(&mut self, change: impl FnOnce(&mut Vec<Measurement>) -> Option<T>) -> Option<T> {
         let snapshot = self.project.clone();
-        let outcome = change(self.project.measurements.entry(self.page).or_default());
+        let outcome = change(self.project.measurements.entry(self.current).or_default());
 
         if outcome.is_some() {
             self.keep(snapshot);
@@ -769,7 +899,7 @@ impl App {
         self.commit();
 
         let target = self.pen_target;
-        let measurements = self.project.measurements.entry(self.page).or_default();
+        let measurements = self.project.measurements.entry(self.current).or_default();
 
         let traced = match target.and_then(|index| Some((index, measurements.get_mut(index)?))) {
             Some((index, measurement)) => {
@@ -812,9 +942,9 @@ impl App {
     fn render(&mut self, ctx: &egui::Context, canvas: Rect) {
         self.resettle_at = None;
 
-        let Some(document) = &self.document else {
+        if self.document().is_none() {
             return;
-        };
+        }
 
         let visible = self
             .viewport
@@ -827,8 +957,14 @@ impl App {
         }
 
         let scale = self.viewport.zoom * ctx.pixels_per_point() as f64;
+        let sheet = self.current;
 
-        match document.render_region(self.page, visible, scale) {
+        let rastered = match self.document() {
+            Some(document) => document.render_region(sheet.page, visible, scale),
+            None => return,
+        };
+
+        match rastered {
             Ok(raster) => {
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [raster.width, raster.height],
@@ -837,14 +973,20 @@ impl App {
 
                 self.rendered = Some(Rendered {
                     texture: ctx.load_texture("page", image, egui::TextureOptions::LINEAR),
-                    page: self.page,
+                    sheet,
                     region: raster.region,
                 });
             }
             Err(message) => {
-                self.document = None;
+                // The drawing is put down rather than asked again every time
+                // the view settles. The rest of the project stands: one
+                // unreadable file is not the end of the work on the others.
+                if let Some(document) = self.documents.get_mut(sheet.drawing) {
+                    *document = None;
+                }
+
                 self.rendered = None;
-                self.error = Some(message);
+                self.complain(message);
             }
         }
     }
@@ -857,13 +999,29 @@ impl App {
             }
 
             // Every one of these needs a drawing to act on.
-            let open = self.drawing.is_some();
+            let open = !self.project.drawings.is_empty();
+
+            if ui
+                .add_enabled(open, egui::Button::new("Add drawing…"))
+                .clicked()
+            {
+                self.add_drawing_dialog();
+            }
+
+            ui.separator();
 
             if ui
                 .add_enabled(open, egui::Button::new("Save").shortcut_text("Ctrl+S"))
                 .clicked()
             {
                 self.save();
+            }
+
+            if ui
+                .add_enabled(open, egui::Button::new("Save as…"))
+                .clicked()
+            {
+                self.save_as_dialog();
             }
 
             if ui
@@ -893,7 +1051,7 @@ impl App {
         ui.horizontal(|ui| {
             self.file_menu(ui);
 
-            if self.document.is_none() {
+            if self.document().is_none() {
                 return;
             }
 
@@ -909,18 +1067,22 @@ impl App {
             ui.separator();
 
             let previous = egui::Button::new("◀");
-            if ui.add_enabled(self.page > 0, previous).clicked() {
-                self.show_page(self.page - 1);
+            if ui.add_enabled(self.current.page > 0, previous).clicked() {
+                self.show_page(self.current.page - 1);
             }
 
-            ui.label(format!("Page {} of {}", self.page + 1, self.page_count));
+            ui.label(format!(
+                "Page {} of {}",
+                self.current.page + 1,
+                self.page_count
+            ));
 
             let next = egui::Button::new("▶");
             if ui
-                .add_enabled(self.page + 1 < self.page_count, next)
+                .add_enabled(self.current.page + 1 < self.page_count, next)
                 .clicked()
             {
-                self.show_page(self.page + 1);
+                self.show_page(self.current.page + 1);
             }
 
             ui.separator();
@@ -961,7 +1123,7 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                match self.project.calibrations.get(&self.page) {
+                match self.project.calibrations.get(&self.current) {
                     Some(calibration) => ui.label(scale_label(calibration)),
                     None => ui.label("Not calibrated"),
                 };
@@ -986,7 +1148,7 @@ impl App {
                 Some(Pick::Second { .. }) => "Click the second point",
                 None => "Enter the distance between the two points",
             },
-            Tool::Pen if !self.project.calibrations.contains_key(&self.page) => {
+            Tool::Pen if !self.project.calibrations.contains_key(&self.current) => {
                 "Calibrate this page before measuring areas on it"
             }
             Tool::Pen if self.pen_target.is_some() => "Tracing a hole; right-click to close",
@@ -1183,11 +1345,11 @@ impl App {
             self.pen_target = Some(index);
         }
 
-        if input.page_up && self.page > 0 {
-            self.show_page(self.page - 1);
+        if input.page_up && self.current.page > 0 {
+            self.show_page(self.current.page - 1);
         }
-        if input.page_down && self.page + 1 < self.page_count {
-            self.show_page(self.page + 1);
+        if input.page_down && self.current.page + 1 < self.page_count {
+            self.show_page(self.current.page + 1);
         }
 
         if self.refit {
@@ -1318,15 +1480,81 @@ impl App {
 
     /// The list of what has been measured on this page, and everything that
     /// can be done to a measurement as a whole.
+    /// The drawings the project holds, the one on screen picked out. A drawing
+    /// whose file could not be opened keeps its place and says so: the work
+    /// filed under it is still in the project, and still in the export.
+    fn drawings_list(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.heading("Drawings");
+        ui.add_space(4.0);
+
+        let mut go_to = None;
+
+        for (index, drawing) in self.project.drawings.iter().enumerate() {
+            let opened = self.documents.get(index).is_some_and(Option::is_some);
+            let current = index == self.current.drawing;
+
+            // How much of the project stands behind this drawing, so a list of
+            // sheet names is also a list of where the work is.
+            let measured: usize = self
+                .project
+                .measurements
+                .iter()
+                .filter(|(sheet, _)| sheet.drawing == index)
+                .map(|(_, measurements)| measurements.len())
+                .sum();
+
+            ui.horizontal(|ui| {
+                let label = egui::Button::new(drawing.name())
+                    .selected(current)
+                    .min_size(egui::vec2(150.0, 0.0));
+
+                if ui
+                    .add_enabled(opened, label)
+                    .on_hover_text(drawing.path.display().to_string())
+                    .on_disabled_hover_text(format!(
+                        "{} could not be opened",
+                        drawing.path.display()
+                    ))
+                    .clicked()
+                {
+                    go_to = Some(index);
+                }
+
+                if !opened {
+                    ui.colored_label(ui.visuals().error_fg_color, "missing");
+                } else if measured > 0 {
+                    ui.weak(format!(
+                        "{measured} area{}",
+                        if measured == 1 { "" } else { "s" }
+                    ));
+                }
+            });
+        }
+
+        if let Some(index) = go_to
+            && index != self.current.drawing
+            && let Err(message) = self.show_sheet(Sheet::new(index, 0))
+        {
+            self.complain(message);
+        }
+
+        ui.add_space(4.0);
+        ui.separator();
+    }
+
     fn measurements_panel(&mut self, ui: &mut egui::Ui) {
         let panel = egui::Panel::right("measurements")
             .default_size(PANEL_WIDTH)
             .show(ui, |ui| {
+                self.drawings_list(ui);
+
                 ui.add_space(4.0);
                 ui.heading("Measurements");
                 ui.add_space(4.0);
 
-                let Some(calibration) = self.project.calibrations.get(&self.page).copied() else {
+                let Some(calibration) = self.project.calibrations.get(&self.current).copied()
+                else {
                     ui.label("Calibrate this page to measure areas on it.");
                     return;
                 };
@@ -1334,7 +1562,7 @@ impl App {
                 if self
                     .project
                     .measurements
-                    .get(&self.page)
+                    .get(&self.current)
                     .is_none_or(Vec::is_empty)
                 {
                     ui.label("Nothing traced on this page yet.");
@@ -1356,7 +1584,7 @@ impl App {
                 let measurements = self
                     .project
                     .measurements
-                    .get_mut(&self.page)
+                    .get_mut(&self.current)
                     .expect("checked above");
 
                 for (index, measurement) in measurements.iter_mut().enumerate() {
@@ -1510,7 +1738,7 @@ impl App {
         for (index, measurement) in self
             .project
             .measurements
-            .get(&self.page)
+            .get(&self.current)
             .into_iter()
             .flatten()
             .enumerate()
@@ -1602,7 +1830,7 @@ impl App {
     /// any anchor on the page.
     fn hit(&self, point: Point, radius: f64) -> Option<(tools::Selection, Grab)> {
         let editor = self.editor.as_ref()?;
-        let measurements = self.project.measurements.get(&self.page)?;
+        let measurements = self.project.measurements.get(&self.current)?;
 
         editor.hit(measurements, self.area_in_hand(), point, radius)
     }
@@ -1639,7 +1867,7 @@ impl App {
             let origin = self
                 .project
                 .measurements
-                .get(&self.page)
+                .get(&self.current)
                 .and_then(|measurements| {
                     measurements
                         .get(found.0.measurement)?
@@ -1676,7 +1904,7 @@ impl App {
             };
 
             let mirror = !input.alt;
-            let measurements = self.project.measurements.entry(self.page).or_default();
+            let measurements = self.project.measurements.entry(self.current).or_default();
 
             tools::move_to(measurements, selection, grab, to, mirror);
         }
@@ -1754,7 +1982,7 @@ impl App {
     fn shape_at(&self, point: Point) -> Option<(usize, Outline)> {
         // Later measurements are drawn over earlier ones, so they are the
         // ones a click means.
-        let measurements = self.project.measurements.get(&self.page)?;
+        let measurements = self.project.measurements.get(&self.current)?;
 
         measurements
             .iter()
@@ -1788,7 +2016,7 @@ impl App {
     /// area is within reach already.
     fn elsewhere(&self, point: Point) -> Option<(usize, Outline)> {
         let (in_hand, _) = self.in_hand?;
-        let measurements = self.project.measurements.get(&self.page)?;
+        let measurements = self.project.measurements.get(&self.current)?;
 
         // A click that still lands on the area in hand belongs to it, even
         // where another area overlaps it.
@@ -1831,7 +2059,7 @@ impl App {
                 let held = self
                     .project
                     .measurements
-                    .get(&self.page)
+                    .get(&self.current)
                     .and_then(|measurements| measurements.get(index))
                     .cloned();
 
@@ -1853,7 +2081,7 @@ impl App {
             let mut moved = held;
             moved.translate(to - from);
 
-            if let Some(measurements) = self.project.measurements.get_mut(&self.page)
+            if let Some(measurements) = self.project.measurements.get_mut(&self.current)
                 && let Some(target) = measurements.get_mut(index)
             {
                 *target = moved;
@@ -1946,7 +2174,7 @@ impl App {
                             match Calibration::new(entry.from, entry.to, distance, entry.unit) {
                                 Some(calibration) => {
                                     self.commit();
-                                    self.project.calibrations.insert(self.page, calibration);
+                                    self.project.calibrations.insert(self.current, calibration);
                                     keep = false;
                                     None
                                 }
@@ -1972,7 +2200,7 @@ impl App {
         painter.rect_filled(to_egui_rect(canvas), 0, BACKDROP);
 
         if let Some(rendered) = &self.rendered
-            && rendered.page == self.page
+            && rendered.sheet == self.current
         {
             // Between renders this is the stale texture, drawn through the
             // live viewport: it scales and shifts with the gesture.
@@ -2006,7 +2234,7 @@ impl App {
     fn draw_overlay(&self, scene: &Scene, cursor: Option<Point>) {
         // The calibrated span stays on the sheet, in page space, as the
         // evidence of what the scale was taken from.
-        if let Some(calibration) = self.project.calibrations.get(&self.page) {
+        if let Some(calibration) = self.project.calibrations.get(&self.current) {
             self.draw_span(scene, calibration.from, calibration.to);
         }
 
@@ -2023,7 +2251,7 @@ impl App {
         for (index, measurement) in self
             .project
             .measurements
-            .get(&self.page)
+            .get(&self.current)
             .into_iter()
             .flatten()
             .enumerate()
@@ -2178,10 +2406,6 @@ impl App {
             None => return,
         }
 
-        let Some(document) = &self.document else {
-            return;
-        };
-
         let zoom = self.viewport.zoom * MAGNIFY;
         let half = f64::from(LOUPE) / 2.0 / zoom;
         let region = Rect::new(
@@ -2191,9 +2415,15 @@ impl App {
             cursor.y + half,
         );
 
-        if let Ok(raster) =
-            document.render_region(self.page, region, zoom * f64::from(ctx.pixels_per_point()))
-        {
+        let page = self.current.page;
+        let scale = zoom * f64::from(ctx.pixels_per_point());
+
+        let rastered = match self.document() {
+            Some(document) => document.render_region(page, region, scale),
+            None => return,
+        };
+
+        if let Ok(raster) = rastered {
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 [raster.width, raster.height],
                 &raster.rgba,
@@ -2230,7 +2460,7 @@ impl App {
         for (index, measurement) in self
             .project
             .measurements
-            .get(&self.page)
+            .get(&self.current)
             .into_iter()
             .flatten()
             .enumerate()
@@ -2299,7 +2529,7 @@ impl App {
             ));
         }
 
-        let Some(calibration) = self.project.calibrations.get(&self.page) else {
+        let Some(calibration) = self.project.calibrations.get(&self.current) else {
             return;
         };
 
@@ -2500,7 +2730,12 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
 
-        if self.document.is_some() && self.error.is_none() {
+        // The panels stand as long as the project does. A drawing that will
+        // not open is one sheet out of action, not the end of the project: the
+        // list is how you get to the others.
+        let open = !self.project.drawings.is_empty();
+
+        if open && self.error.is_none() {
             self.tool_strip(ui);
             self.tool_groups(ui);
             self.measurements_panel(ui);
@@ -2513,8 +2748,25 @@ impl eframe::App for App {
                 return;
             }
 
-            if self.document.is_none() {
-                ui.centered_and_justified(|ui| ui.label("Open a PDF to begin."));
+            if !open {
+                ui.centered_and_justified(|ui| ui.label("Open a drawing to begin."));
+                return;
+            }
+
+            if self.document().is_none() {
+                let missing = self
+                    .project
+                    .drawings
+                    .get(self.current.drawing)
+                    .map(|drawing| drawing.path.display().to_string())
+                    .unwrap_or_default();
+
+                ui.centered_and_justified(|ui| {
+                    ui.label(format!(
+                        "{missing}\n\ncould not be opened. The work measured on it is still in \
+                         the project; pick another drawing from the list."
+                    ))
+                });
                 return;
             }
 
