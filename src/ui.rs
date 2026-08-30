@@ -264,6 +264,11 @@ impl Input {
             let plain = |k| key(k) && !i.modifiers.shift && !i.modifiers.command;
             let shifted = |k| key(k) && i.modifiers.shift && !i.modifiers.command;
 
+            // `+` is a shifted key on most layouts and a key of its own on the
+            // number pad, so shift is not part of the binding: however the
+            // sign was typed, it means the same thing.
+            let sign = |k| key(k) && !i.modifiers.command;
+
             Self {
                 page_up: key(egui::Key::PageUp),
                 page_down: key(egui::Key::PageDown),
@@ -282,9 +287,9 @@ impl Input {
                     Some(Tool::DirectSelect)
                 } else if plain(egui::Key::P) {
                     Some(Tool::Pen)
-                } else if plain(egui::Key::Plus) || plain(egui::Key::Equals) {
+                } else if sign(egui::Key::Plus) || sign(egui::Key::Equals) {
                     Some(Tool::AddAnchor)
-                } else if plain(egui::Key::Minus) {
+                } else if sign(egui::Key::Minus) {
                     Some(Tool::DeleteAnchor)
                 } else {
                     None
@@ -2467,4 +2472,90 @@ fn to_kurbo_point(pos: egui::Pos2) -> Point {
 
 fn to_egui_pos(point: Point) -> egui::Pos2 {
     egui::pos2(point.x as f32, point.y as f32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What `Input::read` makes of one key press, with the modifiers held.
+    fn pressing(key: egui::Key, physical: egui::Key, modifiers: egui::Modifiers) -> Input {
+        let context = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+
+        // What the window layer sends: the modifiers change, then the key.
+        raw.events.push(egui::Event::ModifiersChanged(modifiers));
+        raw.events.push(egui::Event::Key {
+            key,
+            physical_key: Some(physical),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+
+        let mut read = None;
+        let output = context.run_ui(raw, |ui| read = Some(Input::read(ui)));
+        output.drop_without_applying_deltas();
+
+        read.expect("the frame ran")
+    }
+
+    /// On most layouts `+` is typed by holding shift over `=`, which is the
+    /// same key press either way and has to reach the same tool.
+    #[test]
+    fn the_add_anchor_key_answers_however_the_sign_was_typed() {
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+
+        for input in [
+            pressing(egui::Key::Plus, egui::Key::Equals, shift),
+            pressing(egui::Key::Equals, egui::Key::Equals, Default::default()),
+            pressing(egui::Key::Plus, egui::Key::Plus, Default::default()),
+        ] {
+            assert_eq!(input.tool, Some(Tool::AddAnchor));
+        }
+    }
+
+    #[test]
+    fn the_delete_anchor_key_answers_however_the_sign_was_typed() {
+        for input in [
+            pressing(egui::Key::Minus, egui::Key::Minus, Default::default()),
+            pressing(
+                egui::Key::Minus,
+                egui::Key::Minus,
+                egui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            assert_eq!(input.tool, Some(Tool::DeleteAnchor));
+        }
+    }
+
+    /// The letters stay case-sensitive: shift makes a different binding rather
+    /// than the same one.
+    #[test]
+    fn a_shifted_letter_is_not_the_letter() {
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            pressing(egui::Key::C, egui::Key::C, shift).tool,
+            Some(Tool::AnchorPoint)
+        );
+        assert_eq!(
+            pressing(egui::Key::C, egui::Key::C, Default::default()).tool,
+            None
+        );
+        assert_eq!(
+            pressing(egui::Key::V, egui::Key::V, Default::default()).tool,
+            Some(Tool::Select)
+        );
+        assert_eq!(pressing(egui::Key::V, egui::Key::V, shift).tool, None);
+    }
 }
