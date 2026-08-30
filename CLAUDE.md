@@ -167,6 +167,31 @@ Nothing here anticipates it — no field, no hook, no seam. The sidecar gains th
 field with `#[serde(default)]` when it exists, and reads today's files as
 ungrouped work.
 
+**How areas relate to one another: intent, not built here.** Areas partition
+the site. They do not overlap, they leave no gaps, and their areas sum to the
+site's. A build-up is vertical — one area carries several material layers over
+its own footprint — so two areas overlapping would claim both build-ups over
+the ground they share, which is why a partial overlap is always a defect and
+never a feature. Snapping is the guard against the opposite fault, a gap
+between areas meant to abut. Note that this needs no grouping to judge: areas
+never legitimately overlap, whatever they carry.
+
+Containment is the one exception, and it is a deduction rather than an overlap:
+an area lying wholly inside another takes its area off that one. A gross 1200
+measured to be sure the whole of it is treated somehow, a 100 measured within
+it, and the enclosing area nets 1100 while the site still sums to 1200. When
+that is built, the deduction is **derived, not stored**: each area reports
+gross, deducted and net, so that moving or deleting the inner area corrects the
+outer one by itself, and both numbers stay on the page to be checked. Holes
+stay what they are — a void measured as nothing, not a deduction for something
+measured elsewhere. Once there is a site boundary, the sum of the net areas
+against it catches both faults in one number: short means gaps, over means
+overlap.
+
+None of this is built here, and none of it may be resolved silently: an area
+lying inside another does not reduce it today, and the deduction is made by
+hand, by punching a hole where the inner area sits.
+
 ---
 
 ## 5. Working agreement
