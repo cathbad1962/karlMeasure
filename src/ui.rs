@@ -1,11 +1,12 @@
 //! The application window: open a drawing, pan and zoom it, step through pages.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use kurbo::{Point, Rect, Shape, Size, Vec2};
 
-use crate::doc::{Anchor, Calibration, Measurement, Outline, Project, SubPath, Unit};
+use crate::doc::{self, Anchor, Calibration, Measurement, Outline, Project, SubPath, Unit};
 use crate::geom;
 use crate::pdf;
 use crate::tools::{self, Editor, Grab, Pen};
@@ -182,6 +183,14 @@ struct Rendered {
     region: Rect,
 }
 
+/// What saving or exporting had to say, kept in the toolbar until the next one
+/// has something to say instead.
+struct Notice {
+    text: String,
+    /// Whether it is a complaint rather than a report.
+    problem: bool,
+}
+
 /// How far through picking the two ends of a known distance we are.
 #[derive(Clone, Copy)]
 enum Pick {
@@ -197,6 +206,7 @@ struct Input {
     delete: bool,
     undo: bool,
     redo: bool,
+    save: bool,
     /// The tool a key asked for, if one did.
     tool: Option<Tool>,
     snap: bool,
@@ -252,6 +262,7 @@ impl Input {
                 delete: key(egui::Key::Delete) || key(egui::Key::Backspace),
                 undo: command && !i.modifiers.shift && key(egui::Key::Z),
                 redo: command && (key(egui::Key::Y) || (i.modifiers.shift && key(egui::Key::Z))),
+                save: command && key(egui::Key::S),
                 tool: if plain(egui::Key::U) {
                     Some(Tool::Calibrate)
                 } else if shifted(egui::Key::C) {
@@ -296,6 +307,8 @@ struct Entry {
 #[derive(Default)]
 pub struct App {
     document: Option<pdf::Document>,
+    /// The drawing on screen, which is where its sidecar is kept.
+    drawing: Option<PathBuf>,
     page: usize,
     page_count: usize,
     page_size: Size,
@@ -309,6 +322,10 @@ pub struct App {
     canvas: Rect,
     /// Everything the user has built on the drawing.
     project: Project,
+    /// Whether the project has changed since it was last written out.
+    unsaved: bool,
+    /// What saving or exporting last reported.
+    notice: Option<Notice>,
     /// States to go back to, and the ones undone out of.
     undo: Vec<Project>,
     redo: Vec<Project>,
@@ -363,6 +380,8 @@ impl App {
         self.rendered = None;
         self.resettle_at = None;
         self.project = Project::default();
+        self.unsaved = false;
+        self.notice = None;
         self.undo.clear();
         self.redo.clear();
         self.take_up(Tool::Select);
@@ -372,14 +391,91 @@ impl App {
                 self.error = None;
                 self.page_count = document.page_count();
                 self.document = Some(document);
+                self.drawing = Some(path.clone());
+
+                // Work already done on this drawing comes back with it. A
+                // sidecar that cannot be read is worth saying so about, but
+                // not worth withholding the drawing over.
+                match doc::load(&path) {
+                    Ok(Some(project)) => {
+                        self.project = project;
+                        self.report(format!(
+                            "Reopened {}",
+                            doc::file_name(&doc::sidecar_path(&path))
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(message) => self.complain(message),
+                }
+
                 self.show_page(0);
             }
             Err(message) => {
                 self.document = None;
+                self.drawing = None;
                 self.page_count = 0;
                 self.error = Some(message);
             }
         }
+    }
+
+    /// Writes the project to its sidecar, beside the drawing.
+    fn save(&mut self) {
+        let Some(drawing) = self.drawing.clone() else {
+            return;
+        };
+
+        match doc::save(&self.project, &drawing) {
+            Ok(path) => {
+                self.unsaved = false;
+                self.report(format!("Saved {}", doc::file_name(&path)));
+            }
+            Err(message) => self.complain(message),
+        }
+    }
+
+    /// Asks where the CSV should go, and writes it there.
+    fn export_dialog(&mut self) {
+        let Some(drawing) = self.drawing.clone() else {
+            return;
+        };
+
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("Comma separated values", &["csv"])
+            .set_file_name(doc::file_name(&drawing.with_extension("csv")));
+
+        // The drawing's own folder is the likeliest place for the export.
+        if let Some(folder) = drawing.parent() {
+            dialog = dialog.set_directory(folder);
+        }
+
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+
+        match doc::export_csv(&self.project, &path) {
+            Ok(0) => self.complain("Nothing measured to export".to_owned()),
+            Ok(rows) => self.report(format!(
+                "Exported {rows} measurement{} to {}",
+                if rows == 1 { "" } else { "s" },
+                doc::file_name(&path)
+            )),
+            Err(message) => self.complain(message),
+        }
+    }
+
+    fn report(&mut self, text: String) {
+        self.notice = Some(Notice {
+            text,
+            problem: false,
+        });
+    }
+
+    fn complain(&mut self, text: String) {
+        self.notice = Some(Notice {
+            text,
+            problem: true,
+        });
     }
 
     /// Moves to `index`, fitted to the window.
@@ -453,8 +549,16 @@ impl App {
     /// be undone. Anything undone is discarded, since the history is a line
     /// rather than a tree.
     fn commit(&mut self) {
-        self.undo.push(self.project.clone());
+        self.keep(self.project.clone());
+    }
+
+    /// Keeps `snapshot` as the state to go back to. Anything undone is
+    /// discarded, since the history is a line rather than a tree, and the
+    /// project has now moved on from whatever is written beside the drawing.
+    fn keep(&mut self, snapshot: Project) {
+        self.undo.push(snapshot);
         self.redo.clear();
+        self.unsaved = true;
     }
 
     /// Runs a change against the current page's measurements, keeping a
@@ -464,8 +568,7 @@ impl App {
         let outcome = change(self.project.measurements.entry(self.page).or_default());
 
         if outcome.is_some() {
-            self.undo.push(snapshot);
-            self.redo.clear();
+            self.keep(snapshot);
         }
 
         outcome
@@ -475,6 +578,7 @@ impl App {
         if let Some(previous) = self.undo.pop() {
             let current = std::mem::replace(&mut self.project, previous);
             self.redo.push(current);
+            self.unsaved = true;
             self.forget_selection();
         }
     }
@@ -483,6 +587,7 @@ impl App {
         if let Some(next) = self.redo.pop() {
             let current = std::mem::replace(&mut self.project, next);
             self.undo.push(current);
+            self.unsaved = true;
             self.forget_selection();
         }
     }
@@ -610,6 +715,23 @@ impl App {
                 return;
             }
 
+            if ui.button("Save").clicked() {
+                self.save();
+            }
+
+            // Whether there is anything to save is worth a glance, not a
+            // sentence.
+            ui.weak(if self.unsaved { "•" } else { " " })
+                .on_hover_text(if self.unsaved {
+                    "Unsaved changes"
+                } else {
+                    "Saved"
+                });
+
+            if ui.button("Export CSV…").clicked() {
+                self.export_dialog();
+            }
+
             ui.separator();
 
             let previous = egui::Button::new("◀");
@@ -669,6 +791,15 @@ impl App {
                     Some(calibration) => ui.label(scale_label(calibration)),
                     None => ui.label("Not calibrated"),
                 };
+
+                if let Some(notice) = &self.notice {
+                    ui.separator();
+                    if notice.problem {
+                        ui.colored_label(ui.visuals().error_fg_color, &notice.text);
+                    } else {
+                        ui.weak(&notice.text);
+                    }
+                }
             });
         });
     }
@@ -854,6 +985,9 @@ impl App {
         }
         if input.redo {
             self.redo();
+        }
+        if input.save {
+            self.save();
         }
 
         if let Some(tool) = input.tool {
@@ -1086,6 +1220,17 @@ impl App {
                             calibration.unit,
                         ));
 
+                        // The perimeter is the outline's own: a hole is a
+                        // boundary of its own, reported on its own row.
+                        ui.weak(format!(
+                            "· {}",
+                            length_label(
+                                calibration.millimetres(geom::perimeter(&measurement.outer)),
+                                calibration.unit,
+                            )
+                        ))
+                        .on_hover_text("Perimeter");
+
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Remove").clicked() {
                                 remove = Some(index);
@@ -1112,6 +1257,14 @@ impl App {
                                     calibration.unit,
                                 )
                             ));
+                            ui.weak(format!(
+                                "· {}",
+                                length_label(
+                                    calibration.millimetres(geom::perimeter(subpath)),
+                                    calibration.unit,
+                                )
+                            ))
+                            .on_hover_text("Perimeter");
 
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -1145,8 +1298,7 @@ impl App {
                 self.renaming = renaming;
 
                 if changed {
-                    self.undo.push(snapshot);
-                    self.redo.clear();
+                    self.keep(snapshot);
                 }
 
                 if remove.is_some() || remove_hole.is_some() {
@@ -2081,6 +2233,30 @@ fn area_label(square_millimetres: f64, unit: Unit) -> String {
             format!("{square_feet:.2} ft²")
         } else {
             format!("{square_inches:.1} in²")
+        }
+    }
+}
+
+/// A length in the unit a person would read it in, the same way round as
+/// `area_label`: metres for a metric drawing, feet for an imperial one,
+/// dropping to the small unit when the large one says nothing.
+fn length_label(millimetres: f64, unit: Unit) -> String {
+    if unit.is_metric() {
+        let metres = millimetres / 1e3;
+
+        if metres >= 0.1 {
+            format!("{metres:.2} m")
+        } else {
+            format!("{millimetres:.0} mm")
+        }
+    } else {
+        let inches = millimetres / 25.4;
+        let feet = inches / 12.0;
+
+        if feet >= 0.5 {
+            format!("{feet:.2} ft")
+        } else {
+            format!("{inches:.1} in")
         }
     }
 }

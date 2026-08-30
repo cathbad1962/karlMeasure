@@ -45,14 +45,24 @@ fn push_segment(path: &mut BezPath, from: &Anchor, to: &Anchor) {
 /// The signed area a closed subpath encloses, in square page points.
 ///
 /// Computed analytically from the curve, never from the flattened outline. The
-/// sign follows the direction it was traced, which is the w.map(|hole| taken_by(&measurement.outer, hole)) mechanism by
-/// which holes subtract.
+/// sign follows the direction it was traced, which is the mechanism by which
+/// holes subtract.
 pub fn signed_area(subpath: &SubPath) -> f64 {
     if !subpath.closed || subpath.anchors.len() < 3 {
         return 0.0;
     }
 
     bez_path(subpath).area()
+}
+
+/// How closely an arc length is worked out, in page points. Well below the
+/// precision any drawing carries.
+const LENGTH_ACCURACY: f64 = 1e-4;
+
+/// How far it is round a subpath, in page points: the whole way round when it
+/// is closed, and from end to end when it is not.
+pub fn perimeter(subpath: &SubPath) -> f64 {
+    bez_path(subpath).perimeter(LENGTH_ACCURACY)
 }
 
 /// How finely outlines are flattened before they are clipped against one
@@ -727,5 +737,64 @@ mod tests {
         let square = corners(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)], true);
 
         assert_eq!(outline(&square, 0.01).len(), 5);
+    }
+
+    /// A closed square measures its four sides; the same corners left open
+    /// measure only the three that are drawn.
+    #[test]
+    fn perimeter_goes_the_whole_way_round_a_closed_subpath() {
+        let points = [(10.0, 10.0), (110.0, 10.0), (110.0, 110.0), (10.0, 110.0)];
+
+        assert!((perimeter(&corners(&points, true)) - 400.0).abs() < 1e-6);
+        assert!((perimeter(&corners(&points, false)) - 300.0).abs() < 1e-6);
+    }
+
+    /// A circle drawn as four cubics with the usual handle length comes within
+    /// a whisker of its true circumference.
+    #[test]
+    fn perimeter_follows_the_curve_rather_than_the_chords() {
+        let radius = 50.0;
+        let handle = radius * 4.0 / 3.0 * (std::f64::consts::FRAC_PI_8).tan();
+        let circle = SubPath {
+            anchors: vec![
+                Anchor {
+                    pos: Point::new(radius, 0.0),
+                    in_handle: Vec2::new(0.0, -handle),
+                    out_handle: Vec2::new(0.0, handle),
+                    kind: AnchorKind::Smooth,
+                },
+                Anchor {
+                    pos: Point::new(0.0, radius),
+                    in_handle: Vec2::new(handle, 0.0),
+                    out_handle: Vec2::new(-handle, 0.0),
+                    kind: AnchorKind::Smooth,
+                },
+                Anchor {
+                    pos: Point::new(-radius, 0.0),
+                    in_handle: Vec2::new(0.0, handle),
+                    out_handle: Vec2::new(0.0, -handle),
+                    kind: AnchorKind::Smooth,
+                },
+                Anchor {
+                    pos: Point::new(0.0, -radius),
+                    in_handle: Vec2::new(-handle, 0.0),
+                    out_handle: Vec2::new(handle, 0.0),
+                    kind: AnchorKind::Smooth,
+                },
+            ],
+            closed: true,
+        };
+
+        let circumference = std::f64::consts::TAU * radius;
+
+        let measured = perimeter(&circle);
+
+        // The four chords would come out a tenth short; the cubics themselves
+        // are a shade long, which is the approximation's own error, not the
+        // measuring of it.
+        assert!(
+            (measured - circumference).abs() < circumference * 1e-3,
+            "measured {measured} against {circumference}"
+        );
     }
 }

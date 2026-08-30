@@ -3,3 +3,8 @@
 # Real drawings carry identifying title blocks — never commit them.
 *.pdf
 samples/
+
+# A sidecar names the areas measured on a real drawing, which is the same
+# problem in a smaller file. Exports likewise.
+*.measurements.json
+*.csv
