@@ -116,6 +116,7 @@ impl Tool {
 }
 
 /// The precision aids, which are toggles rather than tools.
+#[derive(Clone, Copy)]
 struct Assist {
     snap: bool,
     magnifier: bool,
@@ -324,6 +325,8 @@ pub struct App {
     project: Project,
     /// Whether the project has changed since it was last written out.
     unsaved: bool,
+    /// Whether closing is waiting on an answer about unsaved measurements.
+    closing: bool,
     /// What saving or exporting last reported.
     notice: Option<Notice>,
     /// States to go back to, and the ones undone out of.
@@ -461,6 +464,67 @@ impl App {
                 doc::file_name(&path)
             )),
             Err(message) => self.complain(message),
+        }
+    }
+
+    /// Puts the drawing down, asking first if that would throw away work.
+    fn close_project(&mut self) {
+        if self.unsaved {
+            self.closing = true;
+        } else {
+            self.close();
+        }
+    }
+
+    /// Back to the window as it started, with nothing open. The aids and the
+    /// widths are how the user likes the window, not part of the project, so
+    /// they stay as they were.
+    fn close(&mut self) {
+        *self = Self {
+            assist: self.assist,
+            groups_hidden: self.groups_hidden,
+            panel_width: self.panel_width,
+            ..Self::default()
+        };
+    }
+
+    /// The question asked when closing would lose unsaved measurements.
+    fn confirm_close(&mut self, ctx: &egui::Context) {
+        if !self.closing {
+            return;
+        }
+
+        let modal = egui::Modal::new(egui::Id::new("confirm close")).show(ctx, |ui| {
+            ui.heading("Close the project?");
+            ui.label("The measurements on this drawing have not been saved.");
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                if ui.button("Save and close").clicked() {
+                    self.save();
+
+                    // A save that failed has already said so; leave the
+                    // project open rather than close over the top of it.
+                    if self.unsaved {
+                        self.closing = false;
+                    } else {
+                        self.close();
+                    }
+                }
+
+                if ui.button("Discard").clicked() {
+                    self.close();
+                }
+
+                if ui.button("Cancel").clicked() {
+                    self.closing = false;
+                }
+            });
+        });
+
+        // Escape, or a click on the backdrop, means the same as Cancel.
+        if modal.should_close() {
+            self.closing = false;
         }
     }
 
@@ -705,18 +769,52 @@ impl App {
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+    /// Everything that acts on the project as a whole, in one place.
+    fn file_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("File", |ui| {
             if ui.button("Open…").clicked() {
                 self.open_dialog();
             }
 
-            if self.document.is_none() {
-                return;
+            // Every one of these needs a drawing to act on.
+            let open = self.drawing.is_some();
+
+            if ui
+                .add_enabled(open, egui::Button::new("Save").shortcut_text("Ctrl+S"))
+                .clicked()
+            {
+                self.save();
             }
 
-            if ui.button("Save").clicked() {
-                self.save();
+            if ui
+                .add_enabled(open, egui::Button::new("Export CSV…"))
+                .clicked()
+            {
+                self.export_dialog();
+            }
+
+            ui.separator();
+
+            // A drawing that failed to open is also something to close: it is
+            // what the window is showing.
+            if ui
+                .add_enabled(
+                    open || self.error.is_some(),
+                    egui::Button::new("Close project"),
+                )
+                .clicked()
+            {
+                self.close_project();
+            }
+        });
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            self.file_menu(ui);
+
+            if self.document.is_none() {
+                return;
             }
 
             // Whether there is anything to save is worth a glance, not a
@@ -727,10 +825,6 @@ impl App {
                 } else {
                     "Saved"
                 });
-
-            if ui.button("Export CSV…").clicked() {
-                self.export_dialog();
-            }
 
             ui.separator();
 
@@ -2302,6 +2396,9 @@ impl eframe::App for App {
 
             self.canvas(ui);
         });
+
+        let ctx = ui.ctx().clone();
+        self.confirm_close(&ctx);
     }
 }
 
