@@ -116,6 +116,7 @@ impl Editor {
     pub fn hit(
         &self,
         measurements: &[Measurement],
+        within: Option<usize>,
         point: Point,
         radius: f64,
     ) -> Option<(Selection, Grab)> {
@@ -129,7 +130,7 @@ impl Editor {
             }
         }
 
-        for (index, measurement) in visible(measurements) {
+        for (index, measurement) in reachable(measurements, within) {
             for (outline, subpath) in measurement.outlines() {
                 for (at, anchor) in subpath.anchors.iter().enumerate() {
                     if (anchor.pos - point).hypot() <= radius {
@@ -151,12 +152,18 @@ impl Editor {
 }
 
 /// The measurements a click can reach, keeping the index each one is filed
-/// under: a hidden outline is not there to be grabbed.
-fn visible(measurements: &[Measurement]) -> impl Iterator<Item = (usize, &Measurement)> {
+/// under: `within` is the one in hand, which is the only one an anchor tool
+/// reaches while there is one. A hidden outline is not there to be grabbed.
+fn reachable(
+    measurements: &[Measurement],
+    within: Option<usize>,
+) -> impl Iterator<Item = (usize, &Measurement)> {
     measurements
         .iter()
         .enumerate()
-        .filter(|(_, measurement)| measurement.visible)
+        .filter(move |(index, measurement)| {
+            measurement.visible && within.is_none_or(|only| only == *index)
+        })
 }
 
 fn anchor(measurements: &[Measurement], selection: Selection) -> Option<&Anchor> {
@@ -214,8 +221,13 @@ pub fn move_to(
 
 /// Inserts an anchor where `point` falls on an outline, if it falls within
 /// `radius` of one, and says which anchor to select next.
-pub fn insert(measurements: &mut [Measurement], point: Point, radius: f64) -> Option<Selection> {
-    let (index, outline, found) = visible(measurements)
+pub fn insert(
+    measurements: &mut [Measurement],
+    within: Option<usize>,
+    point: Point,
+    radius: f64,
+) -> Option<Selection> {
+    let (index, outline, found) = reachable(measurements, within)
         .flat_map(|(index, measurement)| {
             measurement
                 .outlines()
@@ -414,10 +426,13 @@ mod tests {
         let editor = Editor::default();
 
         assert_eq!(
-            editor.hit(&measurements, Point::new(103.0, 2.0), 5.0),
+            editor.hit(&measurements, None, Point::new(103.0, 2.0), 5.0),
             Some((at(0, 1), Grab::Anchor))
         );
-        assert_eq!(editor.hit(&measurements, Point::new(50.0, 50.0), 5.0), None);
+        assert_eq!(
+            editor.hit(&measurements, None, Point::new(50.0, 50.0), 5.0),
+            None
+        );
     }
 
     /// A handle is only reachable once its anchor is selected, because that is
@@ -430,7 +445,7 @@ mod tests {
 
         let unselected = Editor::default();
         assert_eq!(
-            unselected.hit(&measurements, Point::new(20.0, 0.0), 5.0),
+            unselected.hit(&measurements, None, Point::new(20.0, 0.0), 5.0),
             None
         );
 
@@ -439,7 +454,7 @@ mod tests {
             ..Editor::default()
         };
         assert_eq!(
-            selected.hit(&measurements, Point::new(20.0, 0.0), 5.0),
+            selected.hit(&measurements, None, Point::new(20.0, 0.0), 5.0),
             Some((at(0, 0), Grab::Out))
         );
     }
@@ -513,7 +528,7 @@ mod tests {
         let editor = Editor::default();
 
         assert_eq!(
-            editor.hit(&measurements, Point::new(60.0, 40.0), 5.0),
+            editor.hit(&measurements, None, Point::new(60.0, 40.0), 5.0),
             Some((in_hole(0, 0, 1), Grab::Anchor))
         );
 
@@ -551,7 +566,7 @@ mod tests {
         let mut measurements = square_with_a_hole();
 
         assert_eq!(
-            insert(&mut measurements, Point::new(50.0, 41.0), 5.0),
+            insert(&mut measurements, None, Point::new(50.0, 41.0), 5.0),
             Some(in_hole(0, 0, 1))
         );
         assert_eq!(measurements[0].holes[0].anchors.len(), 5);
@@ -563,13 +578,13 @@ mod tests {
         let mut measurements = square();
 
         assert_eq!(
-            insert(&mut measurements, Point::new(500.0, 500.0), 5.0),
+            insert(&mut measurements, None, Point::new(500.0, 500.0), 5.0),
             None
         );
         assert_eq!(measurements[0].outer.anchors.len(), 4);
 
         assert_eq!(
-            insert(&mut measurements, Point::new(50.0, 2.0), 5.0),
+            insert(&mut measurements, None, Point::new(50.0, 2.0), 5.0),
             Some(at(0, 1))
         );
         assert_eq!(measurements[0].outer.anchors.len(), 5);
@@ -584,5 +599,83 @@ mod tests {
 
         assert!(pen.close().is_none());
         assert_eq!(pen.anchors().len(), 2, "the outline is still being drawn");
+    }
+
+    /// Two squares side by side, sharing the edge at x = 100.
+    fn two_squares() -> Vec<Measurement> {
+        let mut measurements = square();
+        let mut pen = Pen::default();
+
+        pen.place(Point::new(100.0, 0.0));
+        pen.place(Point::new(200.0, 0.0));
+        pen.place(Point::new(200.0, 100.0));
+        pen.place(Point::new(100.0, 100.0));
+
+        measurements.push(Measurement {
+            name: "Area 2".to_owned(),
+            outer: pen.close().expect("four anchors enclose an area"),
+            holes: Vec::new(),
+            colour: eframe::egui::Color32::WHITE,
+            visible: true,
+        });
+
+        measurements
+    }
+
+    /// With one area in hand, a click by the neighbour's anchor reaches
+    /// nothing: an anchor tool only takes hold of what it is showing.
+    #[test]
+    fn an_anchor_is_only_hit_within_the_area_in_hand() {
+        let measurements = two_squares();
+        let editor = Editor::default();
+        let corner = Point::new(200.0, 0.0);
+
+        assert_eq!(
+            editor.hit(&measurements, Some(1), corner, 5.0),
+            Some((at(1, 1), Grab::Anchor))
+        );
+        assert_eq!(editor.hit(&measurements, Some(0), corner, 5.0), None);
+        assert_eq!(
+            editor.hit(&measurements, None, corner, 5.0),
+            Some((at(1, 1), Grab::Anchor))
+        );
+    }
+
+    /// The two squares share an edge, so a point on it is as near to one as to
+    /// the other. Which one gains the anchor is decided by what is in hand,
+    /// not by which happens to be nearest.
+    #[test]
+    fn an_anchor_lands_in_the_area_in_hand_on_a_shared_edge() {
+        let on_the_shared_edge = Point::new(100.0, 50.0);
+
+        let mut measurements = two_squares();
+        assert_eq!(
+            insert(&mut measurements, Some(0), on_the_shared_edge, 5.0),
+            Some(at(0, 2))
+        );
+        assert_eq!(measurements[0].outer.anchors.len(), 5);
+        assert_eq!(measurements[1].outer.anchors.len(), 4);
+
+        let mut measurements = two_squares();
+        assert_eq!(
+            insert(&mut measurements, Some(1), on_the_shared_edge, 5.0),
+            Some(at(1, 4))
+        );
+        assert_eq!(measurements[0].outer.anchors.len(), 4);
+        assert_eq!(measurements[1].outer.anchors.len(), 5);
+    }
+
+    /// A click nowhere near the area in hand adds nothing, even when it lands
+    /// squarely on another area's edge.
+    #[test]
+    fn no_anchor_lands_outside_the_area_in_hand() {
+        let mut measurements = two_squares();
+
+        assert_eq!(
+            insert(&mut measurements, Some(0), Point::new(150.0, 0.0), 5.0),
+            None
+        );
+        assert_eq!(measurements[0].outer.anchors.len(), 4);
+        assert_eq!(measurements[1].outer.anchors.len(), 4);
     }
 }

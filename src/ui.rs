@@ -145,6 +145,10 @@ struct Scene<'a> {
 /// Whose anchors are worth showing.
 enum Showing {
     Every,
+    /// Every outline of one area: what an anchor tool can reach while it has
+    /// that area in hand.
+    OneArea(usize),
+    /// One outline of one area: what the selection tool has hold of.
     JustOne(usize, Outline),
 }
 
@@ -152,6 +156,7 @@ impl Showing {
     fn includes(&self, measurement: usize, outline: Outline) -> bool {
         match self {
             Self::Every => true,
+            Self::OneArea(index) => *index == measurement,
             Self::JustOne(index, which) => *index == measurement && *which == outline,
         }
     }
@@ -369,10 +374,12 @@ pub struct App {
     renaming: Option<usize>,
     /// Present while the edit tool is armed.
     editor: Option<Editor>,
-    /// What the selection tool has hold of: a measurement, by one of its
-    /// outlines. Clicking inside a hole takes the hole rather than the area
-    /// it is cut from, which is what makes a hole removable.
-    selected_shape: Option<(usize, Outline)>,
+    /// The area being worked on, by one of its outlines, whatever tool is in
+    /// hand. Every tool reads this one: the anchor tools show and edit only
+    /// this area, `h` punches its hole in it, and the list picks its row out.
+    /// Clicking inside a hole takes the hole rather than the area it is cut
+    /// from, which is what makes a hole removable.
+    in_hand: Option<(usize, Outline)>,
     /// A measurement being dragged bodily: which one, how it was before the
     /// drag began, and the page point the drag started from.
     moving: Option<(usize, Box<Measurement>, Point)>,
@@ -608,9 +615,10 @@ impl App {
                 self.resettle_at = None;
 
                 // An outline belongs to the page it was traced on, and there
-                // is nothing to trace on a page with no scale. A selection,
-                // and the measurement a hole was going to go into, index one
-                // page's measurements and mean nothing on another.
+                // is nothing to trace on a page with no scale. What was in
+                // hand, and the measurement a hole was going to go into,
+                // index one page's measurements and mean nothing on another.
+                self.let_go();
                 self.renaming = None;
                 self.loupe = None;
 
@@ -690,7 +698,7 @@ impl App {
             let current = std::mem::replace(&mut self.project, previous);
             self.redo.push(current);
             self.unsaved = true;
-            self.forget_selection();
+            self.let_go();
         }
     }
 
@@ -699,17 +707,32 @@ impl App {
             let current = std::mem::replace(&mut self.project, next);
             self.undo.push(current);
             self.unsaved = true;
-            self.forget_selection();
+            self.let_go();
         }
     }
 
-    /// A selection is a pair of indices into the measurements, which the state
-    /// it was made against no longer guarantees.
-    fn forget_selection(&mut self) {
+    /// Lets go of the anchor held within the area in hand, the area itself
+    /// staying where it is.
+    fn let_go_of_anchor(&mut self) {
         if let Some(editor) = &mut self.editor {
             editor.selected = None;
             editor.grabbed = None;
         }
+    }
+
+    /// Lets go of everything: the area in hand and any anchor within it. What
+    /// was in hand is a pair of indices, which the state it was taken from no
+    /// longer guarantees.
+    fn let_go(&mut self) {
+        self.in_hand = None;
+        self.let_go_of_anchor();
+    }
+
+    /// Takes an area up: what the tools show and act on from here. Any anchor
+    /// held in the last one goes with it.
+    fn take_in_hand(&mut self, shape: (usize, Outline)) {
+        self.in_hand = Some(shape);
+        self.let_go_of_anchor();
     }
 
     /// Takes a click while calibrating: the first ends up as one end of the
@@ -748,27 +771,37 @@ impl App {
         let target = self.pen_target;
         let measurements = self.project.measurements.entry(self.page).or_default();
 
-        if let Some(measurement) = target.and_then(|index| measurements.get_mut(index)) {
-            // Wound against its outline, so it takes area away rather than
-            // adding it, however it was traced.
-            let hole = geom::as_hole(&measurement.outer, outline);
-            measurement.holes.push(hole);
+        let traced = match target.and_then(|index| Some((index, measurements.get_mut(index)?))) {
+            Some((index, measurement)) => {
+                // Wound against its outline, so it takes area away rather than
+                // adding it, however it was traced.
+                let hole = geom::as_hole(&measurement.outer, outline);
+                measurement.holes.push(hole);
 
-            // One press of `h`, one hole. The pen goes back to drawing new
-            // areas rather than quietly filling the same one with holes.
-            self.pen_target = None;
-            return;
-        }
+                // One press of `h`, one hole. The pen goes back to drawing new
+                // areas rather than quietly filling the same one with holes.
+                self.pen_target = None;
 
-        let name = format!("Area {}", measurements.len() + 1);
+                (index, Outline::Hole(measurement.holes.len() - 1))
+            }
+            None => {
+                let name = format!("Area {}", measurements.len() + 1);
 
-        measurements.push(Measurement {
-            name,
-            outer: outline,
-            holes: Vec::new(),
-            colour: OUTLINE,
-            visible: true,
-        });
+                measurements.push(Measurement {
+                    name,
+                    outer: outline,
+                    holes: Vec::new(),
+                    colour: OUTLINE,
+                    visible: true,
+                });
+
+                (measurements.len() - 1, Outline::Outer)
+            }
+        };
+
+        // What was just traced is what is in hand, so `h` punches a hole in it
+        // without a selection step in between.
+        self.take_in_hand(traced);
     }
 
     fn page_rect(&self) -> Rect {
@@ -1119,6 +1152,9 @@ impl App {
             if let Some(pen) = &mut self.pen {
                 pen.clear();
             }
+
+            // Letting go puts every area back within reach of the tools.
+            self.let_go();
         }
 
         if input.undo {
@@ -1141,7 +1177,7 @@ impl App {
         // A hole goes into whichever measurement is in hand, however it came
         // to be in hand.
         if input.hole
-            && let Some(index) = self.current_measurement()
+            && let Some(index) = self.area_in_hand()
         {
             self.take_up(Tool::Pen);
             self.pen_target = Some(index);
@@ -1310,9 +1346,9 @@ impl App {
                 let snapshot = self.project.clone();
                 let mut changed = false;
                 let mut renaming = self.renaming;
-                let selected = (self.tool == Tool::Select)
-                    .then_some(self.selected_shape)
-                    .flatten();
+                // Whatever is in hand is picked out whatever tool is holding
+                // it, so the canvas and the list never disagree.
+                let selected = self.in_hand;
                 let mut remove = None;
                 let mut remove_hole = None;
                 let mut hole_in = None;
@@ -1444,11 +1480,14 @@ impl App {
 
                 if remove.is_some() || remove_hole.is_some() {
                     // The indices everything else was holding have moved.
-                    self.selected_shape = None;
+                    self.let_go();
                     self.take_up(Tool::Select);
                 }
 
                 if let Some(index) = hole_in {
+                    // The area the hole is going into is the one in hand,
+                    // whichever one was there before.
+                    self.take_in_hand((index, Outline::Outer));
                     self.take_up(Tool::Pen);
                     self.pen_target = Some(index);
                 }
@@ -1565,7 +1604,13 @@ impl App {
         let editor = self.editor.as_ref()?;
         let measurements = self.project.measurements.get(&self.page)?;
 
-        editor.hit(measurements, point, radius)
+        editor.hit(measurements, self.area_in_hand(), point, radius)
+    }
+
+    /// Which area is in hand, if one is: the only one an anchor tool reaches
+    /// into, and the one a hole is punched in.
+    fn area_in_hand(&self) -> Option<usize> {
+        self.in_hand.map(|(index, _)| index)
     }
 
     /// Reshaping an outline that is already traced: select an anchor, drag it
@@ -1603,6 +1648,9 @@ impl App {
                         .get(found.0.anchor)
                 })
                 .map(|anchor| anchor.pos);
+
+            // Dragging an anchor takes its area up, the same as clicking one.
+            self.in_hand = Some((found.0.measurement, found.0.outline));
 
             if let Some(editor) = &mut self.editor {
                 editor.selected = Some(found.0);
@@ -1646,7 +1694,17 @@ impl App {
             && let Some(pos) = response.interact_pointer_pos()
         {
             let point = self.page_point(pos);
+
+            // A click on another area takes that one up rather than editing it
+            // at arm's length: a tool only ever acts on the anchors it is
+            // showing. The click after this one edits it.
+            if let Some(shape) = self.elsewhere(point) {
+                self.take_in_hand(shape);
+                return;
+            }
+
             let found = self.hit(point, radius).map(|(selection, _)| selection);
+            let within = self.area_in_hand();
 
             let selected = match self.tool {
                 Tool::DirectSelect => found,
@@ -1663,10 +1721,16 @@ impl App {
                     None
                 }
                 Tool::AddAnchor => {
-                    self.edit(|measurements| tools::insert(measurements, point, radius))
+                    self.edit(|measurements| tools::insert(measurements, within, point, radius))
                 }
                 _ => found,
             };
+
+            // Whatever was acted on is now the area in hand, which is how the
+            // tools come to have one when they started with none.
+            if let Some(selection) = selected.or(found) {
+                self.in_hand = Some((selection.measurement, selection.outline));
+            }
 
             if let Some(editor) = &mut self.editor {
                 editor.selected = selected;
@@ -1678,19 +1742,8 @@ impl App {
         };
 
         if input.delete && self.edit(|m| tools::delete(m, selection)).is_some() {
-            self.forget_selection();
+            self.let_go_of_anchor();
         }
-    }
-
-    /// The measurement being worked on, whether it was taken hold of whole or
-    /// by one of its anchors.
-    fn current_measurement(&self) -> Option<usize> {
-        self.selected_shape.map(|(index, _)| index).or_else(|| {
-            self.editor
-                .as_ref()?
-                .selected
-                .map(|selection| selection.measurement)
-        })
     }
 
     /// What lies under a page point, taken whole: a hole if the point is in
@@ -1699,13 +1752,6 @@ impl App {
     /// Holes come first because a point inside one is inside the outline too,
     /// and the hole is the smaller, more particular thing to have meant.
     fn shape_at(&self, point: Point) -> Option<(usize, Outline)> {
-        let reach = HIT / self.viewport.zoom;
-
-        let within = |subpath: &SubPath| {
-            geom::bez_path(subpath).contains(point)
-                || geom::nearest(subpath, point).is_some_and(|found| found.distance <= reach)
-        };
-
         // Later measurements are drawn over earlier ones, so they are the
         // ones a click means.
         let measurements = self.project.measurements.get(&self.page)?;
@@ -1715,19 +1761,46 @@ impl App {
             .enumerate()
             .rev()
             .filter(|(_, measurement)| measurement.visible)
-            .find_map(|(index, measurement)| {
-                let hole = measurement
-                    .holes
-                    .iter()
-                    .position(&within)
-                    .map(Outline::Hole);
+            .find_map(|(index, measurement)| Some((index, self.shape_of(measurement, point)?)))
+    }
 
-                match hole {
-                    Some(outline) => Some((index, outline)),
-                    None if within(&measurement.outer) => Some((index, Outline::Outer)),
-                    None => None,
-                }
-            })
+    /// Which outline of one measurement a point falls on, by the same reading
+    /// as `shape_at`: the hole it is in, or else the area itself.
+    fn shape_of(&self, measurement: &Measurement, point: Point) -> Option<Outline> {
+        let reach = HIT / self.viewport.zoom;
+
+        let within = |subpath: &SubPath| {
+            geom::bez_path(subpath).contains(point)
+                || geom::nearest(subpath, point).is_some_and(|found| found.distance <= reach)
+        };
+
+        match measurement.holes.iter().position(&within) {
+            Some(hole) => Some(Outline::Hole(hole)),
+            None => within(&measurement.outer).then_some(Outline::Outer),
+        }
+    }
+
+    /// The area a click has landed on when it is not the one in hand — what an
+    /// anchor tool takes up instead of editing this one at arm's length.
+    ///
+    /// `None` when the click still belongs to the area in hand, when there is
+    /// nothing under it, or when nothing is in hand: in that last case every
+    /// area is within reach already.
+    fn elsewhere(&self, point: Point) -> Option<(usize, Outline)> {
+        let (in_hand, _) = self.in_hand?;
+        let measurements = self.project.measurements.get(&self.page)?;
+
+        // A click that still lands on the area in hand belongs to it, even
+        // where another area overlaps it.
+        if measurements
+            .get(in_hand)
+            .and_then(|measurement| self.shape_of(measurement, point))
+            .is_some()
+        {
+            return None;
+        }
+
+        self.shape_at(point).filter(|(index, _)| *index != in_hand)
     }
 
     /// Selecting with the selection tool: click an area, or a hole in one.
@@ -1741,7 +1814,7 @@ impl App {
         if response.clicked()
             && let Some(pos) = response.interact_pointer_pos()
         {
-            self.selected_shape = self.shape_at(self.page_point(pos));
+            self.in_hand = self.shape_at(self.page_point(pos));
         }
 
         // A drag takes hold of whatever it started on, and moves it as one
@@ -1753,7 +1826,7 @@ impl App {
 
             if let Some((index, outline)) = self.shape_at(from) {
                 self.commit();
-                self.selected_shape = Some((index, outline));
+                self.in_hand = Some((index, outline));
 
                 let held = self
                     .project
@@ -1793,7 +1866,7 @@ impl App {
         }
 
         if input.delete
-            && let Some((index, outline)) = self.selected_shape
+            && let Some((index, outline)) = self.in_hand
         {
             let removed = self.edit(|measurements| match outline {
                 Outline::Outer => (index < measurements.len()).then(|| measurements.remove(index)),
@@ -1808,7 +1881,7 @@ impl App {
             });
 
             if removed.is_some() {
-                self.selected_shape = None;
+                self.let_go();
             }
         }
     }
@@ -1956,8 +2029,7 @@ impl App {
             .enumerate()
         {
             let selected = self
-                .selected_shape
-                .filter(|_| self.tool == Tool::Select)
+                .in_hand
                 .filter(|(selected, _)| *selected == index)
                 .map(|(_, outline)| outline);
 
@@ -2140,8 +2212,13 @@ impl App {
     /// is. The selected anchor also shows the handles either side of it.
     fn draw_anchors(&self, scene: &Scene) {
         let showing = match self.tool {
-            tool if tool.edits_anchors() => Showing::Every,
-            Tool::Select => match self.selected_shape {
+            // An anchor tool shows what it can reach: the area in hand, or
+            // every area while it has none.
+            tool if tool.edits_anchors() => match self.in_hand {
+                Some((index, _)) => Showing::OneArea(index),
+                None => Showing::Every,
+            },
+            Tool::Select => match self.in_hand {
                 Some((index, outline)) => Showing::JustOne(index, outline),
                 None => return,
             },

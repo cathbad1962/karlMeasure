@@ -146,6 +146,27 @@ Hit radius and handle sizes are specified in **logical points**, converted to
 page units by dividing by zoom, so precision scales with zoom and behaviour is
 identical across display scaling factors.
 
+There is one notion of **what is in hand**: an area, addressed by one of its
+outlines. Every tool reads it and no tool keeps a second idea of what is being
+worked on. The anchor tools show and edit only that area; a click on another
+takes that one up instead of editing at arm's length; whatever the pen has just
+traced is in hand the moment it closes, so a hole goes into it without a
+selection step. Nothing is in hand after a page change or an undo, because a
+pair of indices means nothing against a document it was not taken from.
+
+**Grouping: decided, not built here.** Areas will need grouping — five concrete
+path areas reported individually *and* as one concrete path total — and a group
+will carry an ordered build-up: surface preparation, sand, roadbase, slab, each
+with a thickness, summing to a level reduction, so one traced outline yields
+several lines of quantities. That work belongs to a later, separate project.
+When it comes, a group is a **tag, not a container**: a group is its own entity
+with its own identity, and a measurement carries the id of the one it belongs
+to. Measurements stay a flat list, so every index, hit-test and undo snapshot
+keeps working, and renaming a group is one edit in one place rather than five.
+Nothing here anticipates it — no field, no hook, no seam. The sidecar gains the
+field with `#[serde(default)]` when it exists, and reads today's files as
+ungrouped work.
+
 ---
 
 ## 5. Working agreement
