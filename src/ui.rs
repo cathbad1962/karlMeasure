@@ -192,6 +192,14 @@ struct Notice {
     problem: bool,
 }
 
+/// What a confirmation is standing in the way of: putting the drawing down,
+/// or shutting the window on it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Closing {
+    Project,
+    Window,
+}
+
 /// How far through picking the two ends of a known distance we are.
 #[derive(Clone, Copy)]
 enum Pick {
@@ -325,8 +333,11 @@ pub struct App {
     project: Project,
     /// Whether the project has changed since it was last written out.
     unsaved: bool,
-    /// Whether closing is waiting on an answer about unsaved measurements.
-    closing: bool,
+    /// What closing is waiting on an answer about, if anything is.
+    closing: Option<Closing>,
+    /// Whether the window has been given leave to shut on unsaved work, so
+    /// that the question is not asked a second time.
+    may_close: bool,
     /// What saving or exporting last reported.
     notice: Option<Notice>,
     /// States to go back to, and the ones undone out of.
@@ -470,9 +481,23 @@ impl App {
     /// Puts the drawing down, asking first if that would throw away work.
     fn close_project(&mut self) {
         if self.unsaved {
-            self.closing = true;
+            self.closing = Some(Closing::Project);
         } else {
             self.close();
+        }
+    }
+
+    /// The window has been asked to shut, by the title bar or otherwise.
+    /// Unsaved measurements are worth the same question the File menu asks, so
+    /// the shutting is called off until it has an answer.
+    fn intercept_close(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+
+        if self.unsaved && !self.may_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.closing = Some(Closing::Window);
         }
     }
 
@@ -490,41 +515,58 @@ impl App {
 
     /// The question asked when closing would lose unsaved measurements.
     fn confirm_close(&mut self, ctx: &egui::Context) {
-        if !self.closing {
+        let Some(closing) = self.closing else {
             return;
-        }
+        };
+
+        let (question, keep) = match closing {
+            Closing::Project => ("Close the project?", "Save and close"),
+            Closing::Window => ("Close the application?", "Save and quit"),
+        };
 
         let modal = egui::Modal::new(egui::Id::new("confirm close")).show(ctx, |ui| {
-            ui.heading("Close the project?");
+            ui.heading(question);
             ui.label("The measurements on this drawing have not been saved.");
             ui.add_space(8.0);
 
             ui.horizontal(|ui| {
-                if ui.button("Save and close").clicked() {
+                if ui.button(keep).clicked() {
                     self.save();
 
-                    // A save that failed has already said so; leave the
-                    // project open rather than close over the top of it.
+                    // A save that failed has already said so; stay where we
+                    // are rather than close over the top of it.
                     if self.unsaved {
-                        self.closing = false;
+                        self.closing = None;
                     } else {
-                        self.close();
+                        self.go_through_with(closing, ctx);
                     }
                 }
 
                 if ui.button("Discard").clicked() {
-                    self.close();
+                    self.go_through_with(closing, ctx);
                 }
 
                 if ui.button("Cancel").clicked() {
-                    self.closing = false;
+                    self.closing = None;
                 }
             });
         });
 
         // Escape, or a click on the backdrop, means the same as Cancel.
         if modal.should_close() {
-            self.closing = false;
+            self.closing = None;
+        }
+    }
+
+    /// Sees a closing through, the unsaved work having been dealt with one way
+    /// or the other.
+    fn go_through_with(&mut self, closing: Closing, ctx: &egui::Context) {
+        match closing {
+            Closing::Project => self.close(),
+            Closing::Window => {
+                self.may_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
     }
 
@@ -2398,6 +2440,7 @@ impl eframe::App for App {
         });
 
         let ctx = ui.ctx().clone();
+        self.intercept_close(&ctx);
         self.confirm_close(&ctx);
     }
 }
