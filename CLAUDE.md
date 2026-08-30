@@ -270,11 +270,16 @@ Each line is the definition of done for that session.
 
 Do not start a slice before the previous one has been run and accepted.
 
-**Current slice: 10 — the buffer is spent, packaging remains.** Slice 9 is
-accepted: a project saves to a JSON sidecar beside its drawing and comes back
-with it, measurements export to CSV, and perimeter is reported alongside area.
-The commands that act on the project as a whole sit in a File menu, and
-closing — the project or the window — asks about unsaved work first. The
-buffer went on one notion of what is in hand, described in §4, and that is
-accepted too.
+**Current slice: none — all ten are accepted.** Slice 10 closed them out:
+`scripts\package.ps1` builds a folder that runs on a machine with nothing
+installed — the executable, the library it loads, and the notices both carry —
+and zips it. The mark on the window and on the executable is drawn at build
+time from four coordinates rather than decoded from a file. The notices are
+generated from the dependency graph by `scripts\notices.ps1`, so keeping them
+accurate is one command. A released build is a window and nothing else.
+
+The next piece of work starts by agreeing what it is and what finishing it
+looks like, the same way each slice did. §4 records three decisions made for
+work that belongs elsewhere — grouping, how areas relate to one another, and
+how a type's areas are named — none of which is built here.
 Update this line when a slice is accepted.
