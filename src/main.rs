@@ -1,3 +1,9 @@
+// A released build is a window and nothing else. Without this, Windows opens a
+// console beside it, because that is what it does for any executable that does
+// not say otherwise. A development build keeps the console: it is where a
+// panic goes when there is no window left to say it in.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod doc;
 mod geom;
 mod pdf;
