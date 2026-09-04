@@ -93,23 +93,19 @@ impl Calibration {
         self.distance / (self.to - self.from).hypot()
     }
 
+    /// Real millimetres for one page point. The same number as
+    /// `units_per_point`, in the unit the site is held in whatever unit the
+    /// scale was given in.
+    pub fn millimetres_per_point(&self) -> f64 {
+        self.units_per_point() * self.unit.millimetres()
+    }
+
     /// The drawing ratio: real millimetres covered by one millimetre of paper.
     /// A 1:100 drawing gives 100.
     pub fn ratio(&self) -> f64 {
         self.units_per_point() * self.unit.millimetres() / MM_PER_POINT
     }
 
-    /// The real area, in square millimetres, of `area` square page points.
-    /// Square millimetres because every unit converts to them exactly; how the
-    /// number is then read out is a question for whoever displays it.
-    pub fn square_millimetres(&self, area: f64) -> f64 {
-        area * (self.units_per_point() * self.unit.millimetres()).powi(2)
-    }
-
-    /// The real length, in millimetres, of `length` page points.
-    pub fn millimetres(&self, length: f64) -> f64 {
-        length * self.units_per_point() * self.unit.millimetres()
-    }
 }
 
 /// A colour as the four bytes it already is, rather than whatever shape the
@@ -223,6 +219,131 @@ impl Measurement {
     }
 }
 
+/// Where a sheet sits in the site: a similarity transform from its page points
+/// into site millimetres.
+///
+/// Uniform scale, rotation and translation, and nothing else. A sheet that
+/// would need shearing to fit is a sheet that is wrong, and that should be
+/// said rather than accommodated.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Placement {
+    /// Site millimetres per page point.
+    pub scale: f64,
+    /// How far the page is turned to lie square with the site, in radians.
+    pub rotation: f64,
+    /// Where the page's origin lands, in site millimetres.
+    pub translation: Vec2,
+}
+
+impl Placement {
+    /// What calibrating a sheet gives it: the site is that sheet's page space
+    /// scaled up, so it lies square with the site and shares its origin. This
+    /// is the one placement that derives from nothing else, which is why only
+    /// the first drawing is ever calibrated.
+    pub fn calibrated(calibration: &Calibration) -> Self {
+        Self {
+            scale: calibration.millimetres_per_point(),
+            rotation: 0.0,
+            translation: Vec2::ZERO,
+        }
+    }
+
+    /// The placement carrying two points identified on an incoming sheet onto
+    /// the two places in the site they are known to be.
+    ///
+    /// Two pairs fix a similarity exactly, so the scale and the rotation both
+    /// fall out of the match: nothing is inherited, and a sheet plotted at any
+    /// scale and laid out at any rotation lands where it belongs. `None` when
+    /// either pair coincides, which fixes nothing.
+    pub fn matching(page: (Point, Point), site: (Point, Point)) -> Option<Self> {
+        let along_page = page.1 - page.0;
+        let along_site = site.1 - site.0;
+
+        if along_page.hypot() <= f64::EPSILON || along_site.hypot() <= f64::EPSILON {
+            return None;
+        }
+
+        let turned = Self {
+            scale: along_site.hypot() / along_page.hypot(),
+            rotation: along_site.atan2() - along_page.atan2(),
+            translation: Vec2::ZERO,
+        };
+
+        // Whatever is left over once the first point has been scaled and
+        // turned is how far the sheet has to be carried.
+        Some(Self {
+            translation: site.0 - turned.site(page.0),
+            ..turned
+        })
+    }
+
+    /// Where a page point on this sheet falls in the site.
+    pub fn site(&self, page: Point) -> Point {
+        let (sin, cos) = self.rotation.sin_cos();
+        let (x, y) = (page.x * self.scale, page.y * self.scale);
+
+        Point::new(x * cos - y * sin, x * sin + y * cos) + self.translation
+    }
+
+    /// Where a place in the site falls on this sheet, in page points.
+    pub fn page(&self, site: Point) -> Point {
+        let (sin, cos) = self.rotation.sin_cos();
+        let from = site - self.translation;
+
+        Point::new(
+            (from.x * cos + from.y * sin) / self.scale,
+            (from.y * cos - from.x * sin) / self.scale,
+        )
+    }
+
+    /// The drawing ratio: real millimetres covered by one millimetre of paper.
+    /// A 1:100 sheet gives 100.
+    pub fn ratio(&self) -> f64 {
+        self.scale / MM_PER_POINT
+    }
+}
+
+/// How a placed sheet's page points read as real measurements.
+///
+/// The calibrated sheet gets this from the scale it was given; a matched one
+/// gets it from the scale its match derived. Either way it is the same two
+/// numbers, which is what lets a measurement be taken on any placed sheet
+/// without caring how the sheet came to be placed.
+#[derive(Clone, Copy, Debug)]
+pub struct Measure {
+    /// Real millimetres per page point.
+    pub scale: f64,
+    /// What the site reads in, which is the unit the first scale was given in.
+    pub unit: Unit,
+}
+
+impl Measure {
+    /// The real area, in square millimetres, of `area` square page points.
+    pub fn square_millimetres(&self, area: f64) -> f64 {
+        area * self.scale.powi(2)
+    }
+
+    /// The real length, in millimetres, of `length` page points.
+    pub fn millimetres(&self, length: f64) -> f64 {
+        length * self.scale
+    }
+}
+
+/// A marked location in the site, so that the same spot can be found again on
+/// another drawing.
+///
+/// It belongs to the site and not to any one drawing: it is held in site
+/// millimetres, and every sheet covering that ground shows it, whether or not
+/// anyone identified it there.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReferencePoint {
+    /// Site space, in millimetres.
+    pub at: Point,
+    /// What it is called. A number so that no point is nameless, until
+    /// somebody gives it a said thing instead.
+    pub label: String,
+}
+
 /// Which sheet: a page of one of the project's drawings.
 ///
 /// Everything the user builds is filed under one of these. A drawing is
@@ -272,6 +393,20 @@ pub struct Project {
     pub drawings: Vec<Drawing>,
     pub calibrations: HashMap<Sheet, Calibration>,
     pub measurements: HashMap<Sheet, Vec<Measurement>>,
+    /// Where each registered sheet sits in the site.
+    ///
+    /// The calibrated sheet is deliberately not in here: its placement is what
+    /// calibrating it gave it, so it is derived rather than stored and the two
+    /// cannot fall out of step.
+    pub placements: HashMap<Sheet, Placement>,
+    /// Held once for the whole project, in site millimetres, because a
+    /// reference point is a place on the site rather than a mark on a sheet.
+    pub reference_points: Vec<ReferencePoint>,
+    /// How many reference points have ever been placed, which is where the
+    /// next one's number comes from. Counted here rather than from the length
+    /// of the list, or removing one would let the next take its number and two
+    /// points would answer to the same name.
+    pub references_placed: usize,
 }
 
 impl Project {
@@ -291,6 +426,7 @@ impl Project {
         let mut sheets: Vec<Sheet> = self
             .calibrations
             .keys()
+            .chain(self.placements.keys())
             .chain(self.measurements.keys())
             .copied()
             .collect();
@@ -299,20 +435,75 @@ impl Project {
         sheets.dedup();
         sheets
     }
+
+    /// The sheet whose calibration establishes the site: the first one
+    /// calibrated, in sheet order.
+    ///
+    /// Site space is that sheet's page space scaled to millimetres — no
+    /// rotation and no translation — so calibrating it is what places it. Any
+    /// other sheet is a sheet nothing has yet related to this one, which is
+    /// why a reference point cannot be put on it.
+    pub fn site_sheet(&self) -> Option<Sheet> {
+        self.calibrations.keys().copied().min()
+    }
+
+    /// Where `sheet` sits in the site, if it has been placed at all. A sheet
+    /// with no placement is one nothing has related to the site yet: it can be
+    /// looked at, and nothing more.
+    pub fn placement(&self, sheet: Sheet) -> Option<Placement> {
+        match self.site_sheet() {
+            Some(placed) if placed == sheet => {
+                Some(Placement::calibrated(&self.calibrations[&sheet]))
+            }
+            _ => self.placements.get(&sheet).copied(),
+        }
+    }
+
+    /// Whether the site exists at all, which it does from the moment the first
+    /// drawing is calibrated.
+    pub fn placed(&self) -> bool {
+        self.site_sheet().is_some()
+    }
+
+    /// What a measurement on `sheet` reads as, if the sheet is placed at all.
+    /// A sheet with no placement has no scale, which is why nothing can be
+    /// traced on one.
+    pub fn measure(&self, sheet: Sheet) -> Option<Measure> {
+        let placement = self.placement(sheet)?;
+        let site = self.site_sheet()?;
+
+        Some(Measure {
+            scale: placement.scale,
+            unit: self.calibrations[&site].unit,
+        })
+    }
 }
 
 /// The project file's format. Raised when a change would stop this reader
 /// making sense of a file, so a file from the future is refused rather than
 /// half-understood. Version 1 was a sidecar beside a single drawing, and is
 /// still read.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// The project as it is written to disk.
+///
+/// Version 2 is this shape without the reference points, so it reads back
+/// through the same struct and comes in with none.
 #[derive(Serialize, Deserialize)]
 struct Stored {
     version: u32,
     drawings: Vec<StoredDrawing>,
     sheets: Vec<StoredSheet>,
+    /// Site millimetres, and not filed under any sheet: the site is what they
+    /// belong to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    reference_points: Vec<ReferencePoint>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    references_placed: usize,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 #[derive(Serialize, Deserialize)]
@@ -328,6 +519,10 @@ struct StoredSheet {
     page: usize,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     calibration: Option<Calibration>,
+    /// Written only for a sheet that was registered. The calibrated sheet's
+    /// placement follows from its calibration and is worked out on the way in.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    placement: Option<Placement>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     measurements: Vec<Measurement>,
 }
@@ -370,20 +565,27 @@ pub fn save(project: &Project, path: &Path) -> Result<(), String> {
             .into_iter()
             .filter_map(|sheet| {
                 let calibration = project.calibrations.get(&sheet).copied();
+                let placement = project.placements.get(&sheet).copied();
                 let measurements = project
                     .measurements
                     .get(&sheet)
                     .cloned()
                     .unwrap_or_default();
 
-                (calibration.is_some() || !measurements.is_empty()).then_some(StoredSheet {
+                let anything =
+                    calibration.is_some() || placement.is_some() || !measurements.is_empty();
+
+                anything.then_some(StoredSheet {
                     drawing: sheet.drawing,
                     page: sheet.page,
                     calibration,
+                    placement,
                     measurements,
                 })
             })
             .collect(),
+        reference_points: project.reference_points.clone(),
+        references_placed: project.references_placed,
     };
 
     let json = serde_json::to_string_pretty(&stored)
@@ -417,7 +619,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
 
             Ok(from_v1(stored, &folder))
         }
-        Some(2) => {
+        Some(2 | 3) => {
             let stored: Stored = serde_json::from_value(value)
                 .map_err(|error| format!("{} is not readable: {error}", file_name(path)))?;
 
@@ -439,6 +641,10 @@ fn from_stored(stored: Stored, folder: &Path) -> Project {
                 path: resolved(&drawing.path, folder),
             })
             .collect(),
+        // A file written before the counter existed still knows how many
+        // points it holds, which is the most it can say about their numbers.
+        references_placed: stored.references_placed.max(stored.reference_points.len()),
+        reference_points: stored.reference_points,
         ..Project::default()
     };
 
@@ -447,6 +653,9 @@ fn from_stored(stored: Stored, folder: &Path) -> Project {
 
         if let Some(calibration) = sheet.calibration {
             project.calibrations.insert(at, calibration);
+        }
+        if let Some(placement) = sheet.placement {
+            project.placements.insert(at, placement);
         }
         if !sheet.measurements.is_empty() {
             project.measurements.insert(at, sheet.measurements);
@@ -473,6 +682,8 @@ fn from_v1(stored: StoredV1, folder: &Path) -> Project {
             .into_iter()
             .map(|(page, measurements)| (Sheet::new(0, page), measurements))
             .collect(),
+        // Phase one had no reference points, so a sidecar comes in with none.
+        ..Project::default()
     }
 }
 
@@ -534,10 +745,11 @@ pub fn export_csv(project: &Project, path: &Path) -> Result<usize, String> {
     let mut rows = 0;
 
     for sheet in project.worked() {
-        let (Some(calibration), Some(measurements)) = (
-            project.calibrations.get(&sheet),
-            project.measurements.get(&sheet),
-        ) else {
+        // Every placed sheet exports the same way, whether its scale was given
+        // to it or derived from a match.
+        let (Some(measure), Some(measurements)) =
+            (project.measure(sheet), project.measurements.get(&sheet))
+        else {
             continue;
         };
 
@@ -549,10 +761,10 @@ pub fn export_csv(project: &Project, path: &Path) -> Result<usize, String> {
 
         for measurement in measurements {
             let square_millimetres =
-                calibration.square_millimetres(geom::measurement_area(measurement));
-            let millimetres = calibration.millimetres(geom::perimeter(&measurement.outer));
+                measure.square_millimetres(geom::measurement_area(measurement));
+            let millimetres = measure.millimetres(geom::perimeter(&measurement.outer));
 
-            let (area, area_unit, perimeter, perimeter_unit) = if calibration.unit.is_metric() {
+            let (area, area_unit, perimeter, perimeter_unit) = if measure.unit.is_metric() {
                 (square_millimetres / 1e6, "m2", millimetres / 1e3, "m")
             } else {
                 (
@@ -684,6 +896,12 @@ mod tests {
                     visible: false,
                 }],
             )]),
+            placements: HashMap::new(),
+            reference_points: vec![ReferencePoint {
+                at: Point::new(1500.0, 2500.0),
+                label: "boundary corner sw".to_owned(),
+            }],
+            references_placed: 1,
         }
     }
 
@@ -720,6 +938,151 @@ mod tests {
         let outer = geom::signed_area(&measurement.outer);
         let hole = geom::signed_area(&measurement.holes[0]);
         assert!(outer * hole < 0.0);
+
+        // A reference point belongs to the site, so it comes back under no
+        // sheet at all, with the name it was given and the number it reached.
+        assert_eq!(reopened.reference_points.len(), 1);
+        assert_eq!(reopened.reference_points[0].label, "boundary corner sw");
+        assert_eq!(reopened.reference_points[0].at, Point::new(1500.0, 2500.0));
+        assert_eq!(reopened.references_placed, 1);
+    }
+
+    /// Calibrating the first sheet is what places the site, and a page point
+    /// on it converts to site millimetres by that scale alone.
+    #[test]
+    fn the_calibrated_sheet_places_the_site() {
+        let project = worked_page();
+
+        // Five metres over a hundred points is fifty millimetres per point.
+        let sheet = Sheet::new(0, 0);
+        let placement = project.placement(sheet).expect("calibrating places it");
+
+        assert_eq!(project.site_sheet(), Some(sheet));
+        assert!((placement.scale - 50.0).abs() < 1e-9);
+        assert_eq!(placement.rotation, 0.0);
+        assert_eq!(placement.translation, Vec2::ZERO);
+
+        let site = placement.site(Point::new(10.0, 4.0));
+        assert_eq!(site, Point::new(500.0, 200.0));
+
+        // And back again, so a mark is drawn where it was put.
+        assert!((placement.page(site) - Point::new(10.0, 4.0)).hypot() < 1e-9);
+    }
+
+    /// Nothing is placed until something is calibrated, so there is nowhere
+    /// for a reference point to go.
+    #[test]
+    fn an_uncalibrated_project_places_nothing() {
+        let project = Project::of(Path::new("site-plan.pdf"));
+
+        assert_eq!(project.site_sheet(), None);
+        assert!(!project.placed());
+        assert!(project.placement(Sheet::new(0, 0)).is_none());
+    }
+
+    /// Two identified places fix an incoming sheet exactly: the scale and the
+    /// rotation both come out of the match, so a sheet at another scale and
+    /// laid out the other way up still lands where it belongs.
+    #[test]
+    fn a_match_gives_the_incoming_sheet_its_scale_and_its_rotation() {
+        // Two places the site already knows, four metres apart along its x.
+        let site = (Point::new(1000.0, 1000.0), Point::new(5000.0, 1000.0));
+
+        // On the incoming sheet they are 100 points apart and run down the
+        // page instead of across it: a quarter turn, at 40 mm to the point.
+        let page = (Point::new(50.0, 20.0), Point::new(50.0, 120.0));
+
+        let placement = Placement::matching(page, site).expect("two distinct pairs place a sheet");
+
+        assert!((placement.scale - 40.0).abs() < 1e-9);
+
+        // Down the page onto across the site is a quarter turn back.
+        assert!((placement.rotation + std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+
+        // Both identified points land exactly where the site says they are.
+        assert!((placement.site(page.0) - site.0).hypot() < 1e-6);
+        assert!((placement.site(page.1) - site.1).hypot() < 1e-6);
+
+        // And a third point converts back and forth without drifting.
+        let elsewhere = Point::new(300.0, 700.0);
+        assert!((placement.page(placement.site(elsewhere)) - elsewhere).hypot() < 1e-6);
+    }
+
+    /// Two clicks on the same spot fix nothing, and are refused rather than
+    /// yielding a placement of no scale.
+    #[test]
+    fn a_match_on_one_spot_places_nothing() {
+        let at = Point::new(50.0, 20.0);
+
+        assert!(
+            Placement::matching(
+                (at, at),
+                (Point::new(0.0, 0.0), Point::new(1000.0, 0.0))
+            )
+            .is_none()
+        );
+    }
+
+    /// A registered sheet keeps its placement across a save, and the
+    /// calibrated one does not need to: its own follows from its scale.
+    #[test]
+    fn a_registered_sheet_comes_back_placed() {
+        let mut project = worked_page();
+        let registered = Sheet::new(1, 0);
+
+        project.drawings.push(Drawing {
+            path: PathBuf::from("sheet-two.pdf"),
+        });
+        project.placements.insert(
+            registered,
+            Placement {
+                scale: 40.0,
+                rotation: std::f64::consts::FRAC_PI_2,
+                translation: Vec2::new(1000.0, -1000.0),
+            },
+        );
+
+        let path = scratch("measure-registered.measure.json");
+        save(&project, &path).expect("the project is written");
+
+        let reopened = load(&path).expect("the project is readable");
+        let _ = std::fs::remove_file(&path);
+
+        let placement = reopened.placement(registered).expect("it was placed");
+        assert!((placement.scale - 40.0).abs() < 1e-9);
+        assert!((placement.rotation - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        assert_eq!(placement.translation, Vec2::new(1000.0, -1000.0));
+
+        // The calibrated sheet is still placed by its calibration alone, and
+        // is not written as a placement of its own.
+        assert!(!reopened.placements.contains_key(&Sheet::new(0, 0)));
+        assert!(reopened.placement(Sheet::new(0, 0)).is_some());
+    }
+
+    /// A project file written before reference points existed reads as one
+    /// with none, rather than being refused.
+    #[test]
+    fn a_file_without_reference_points_opens_with_none() {
+        let folder = std::env::temp_dir().join("measure-version-two");
+        std::fs::create_dir_all(&folder).expect("the scratch folder is writable");
+
+        let path = folder.join("site.measure.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "version": 2,
+                "drawings": [{ "path": "site-plan.pdf" }],
+                "sheets": []
+            }"#,
+        )
+        .expect("the scratch file is writable");
+
+        let project = load(&path).expect("a version two project is readable");
+        let _ = std::fs::remove_dir_all(&folder);
+
+        assert!(project.reference_points.is_empty());
+        assert_eq!(project.references_placed, 0);
+        assert_eq!(project.drawings.len(), 1);
     }
 
     /// A drawing is written relative to the project file beside it, so the

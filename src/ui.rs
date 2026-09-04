@@ -66,6 +66,19 @@ const DECIDED: f64 = 6.0;
 /// The ring drawn round the anchor a placement has caught.
 const SNAPPED: egui::Color32 = egui::Color32::from_rgb(255, 0, 160);
 
+/// A reference point's target: the quadrants alternate between these two, so
+/// that the centre is findable over a drawing of any shade beneath it.
+const TARGET_LIGHT: egui::Color32 = egui::Color32::from_rgb(250, 250, 250);
+const TARGET_DARK: egui::Color32 = egui::Color32::from_rgb(24, 24, 24);
+
+/// The radius of a target's outer circle, on screen. Fixed rather than scaled,
+/// so a marked place stays findable however far the drawing is zoomed out.
+const TARGET: f32 = 8.0;
+
+/// Line segments per quadrant of a target. Enough that the circle reads as one
+/// at the size it is drawn.
+const STEPS: usize = 8;
+
 /// How wide the panels start out.
 const PANEL_WIDTH: f32 = 320.0;
 
@@ -106,6 +119,9 @@ enum Tool {
     DeleteAnchor,
     /// `u` — setting the page scale, once per drawing.
     Calibrate,
+    /// `x` — marking a place in the site, so that the same spot can be found
+    /// again on another drawing. x marks the spot.
+    ReferencePoint,
 }
 
 impl Tool {
@@ -116,6 +132,35 @@ impl Tool {
             self,
             Self::DirectSelect | Self::AnchorPoint | Self::AddAnchor | Self::DeleteAnchor
         )
+    }
+}
+
+/// The fewest points that fix an incoming sheet in the site. Two pairs give a
+/// similarity exactly: scale, rotation and position, with nothing left over.
+const MATCHES: usize = 2;
+
+/// A sheet being tied into the site by identifying places already marked on a
+/// sheet that is already placed.
+///
+/// It lasts only as long as the matching does. A sheet is placed when the
+/// second point is identified, and until then it is a drawing in the project
+/// that nothing can be done on.
+struct Registration {
+    /// The sheet being placed.
+    sheet: Sheet,
+    /// The reference point chosen in the picker, waiting to be clicked on this
+    /// drawing. Nothing is placed by choosing; the click is what identifies it.
+    choosing: Option<usize>,
+    /// Which reference points have been identified, and where each one turned
+    /// out to be on this sheet, in page points.
+    identified: Vec<(usize, Point)>,
+}
+
+impl Registration {
+    /// Whether this point has already been identified, so the picker does not
+    /// offer the same one twice.
+    fn taken(&self, point: usize) -> bool {
+        self.identified.iter().any(|(index, _)| *index == point)
     }
 }
 
@@ -296,6 +341,8 @@ impl Input {
                     Some(Tool::DirectSelect)
                 } else if plain(egui::Key::P) {
                     Some(Tool::Pen)
+                } else if plain(egui::Key::X) {
+                    Some(Tool::ReferencePoint)
                 } else if sign(egui::Key::Plus) || sign(egui::Key::Equals) {
                     Some(Tool::AddAnchor)
                 } else if sign(egui::Key::Minus) {
@@ -381,6 +428,10 @@ pub struct App {
     /// The measurement whose name is being typed, so a rename is one thing to
     /// undo rather than one per keystroke.
     renaming: Option<usize>,
+    /// The same, for the reference point whose label is being typed.
+    labelling: Option<usize>,
+    /// The sheet being tied into the site, while one is.
+    registering: Option<Registration>,
     /// Present while the edit tool is armed.
     editor: Option<Editor>,
     /// The area being worked on, by one of its outlines, whatever tool is in
@@ -502,8 +553,45 @@ impl App {
             .collect();
     }
 
-    /// Adds another drawing to the project and moves to it.
+    /// Why another drawing cannot be brought in yet, if it cannot.
+    ///
+    /// A drawing arriving after the first is placed by matching places already
+    /// marked on a sheet that is placed, and two is what that takes. Without
+    /// them there is nothing to match against, so it is refused rather than
+    /// let in to sit unplaced.
+    fn cannot_add_drawing(&self) -> Option<String> {
+        if !self.project.placed() {
+            return Some(
+                "Calibrate this drawing before bringing in another, so there is \
+                 a site to bring it into."
+                    .to_owned(),
+            );
+        }
+
+        let marked = self.project.reference_points.len();
+        if marked < MATCHES {
+            return Some(format!(
+                "Mark at least {MATCHES} reference points with x before bringing in \
+                 another drawing: they are what the next one is matched against. \
+                 There {} so far.",
+                match marked {
+                    0 => "are none".to_owned(),
+                    1 => "is one".to_owned(),
+                    other => format!("are {other}"),
+                }
+            ));
+        }
+
+        None
+    }
+
+    /// Brings in another drawing and begins tying it into the site.
     fn add_drawing_dialog(&mut self) {
+        if let Some(refusal) = self.cannot_add_drawing() {
+            self.complain(refusal);
+            return;
+        }
+
         let Some(path) = rfd::FileDialog::new()
             .add_filter("PDF drawing", &["pdf"])
             .pick_file()
@@ -518,9 +606,19 @@ impl App {
                 self.documents.push(Some(document));
 
                 let added = self.project.drawings.len() - 1;
-                if let Err(message) = self.show_sheet(Sheet::new(added, 0)) {
+                let sheet = Sheet::new(added, 0);
+
+                if let Err(message) = self.show_sheet(sheet) {
                     self.complain(message);
                 }
+
+                // It arrives unplaced, and stays that way until two places are
+                // identified on it.
+                self.registering = Some(Registration {
+                    sheet,
+                    choosing: None,
+                    identified: Vec::new(),
+                });
             }
             Err(message) => self.complain(message),
         }
@@ -751,7 +849,18 @@ impl App {
         self.renaming = None;
         self.loupe = None;
 
-        if self.tool == Tool::Pen && !self.project.calibrations.contains_key(&sheet) {
+        // A tool that cannot act on the sheet being shown is put down rather
+        // than left in hand doing nothing when it is clicked.
+        let unusable = match self.tool {
+            Tool::Pen => self.project.placement(sheet).is_none(),
+            Tool::ReferencePoint => self.project.placement(sheet).is_none(),
+            // Only the first drawing is calibrated; every one after it is
+            // matched into the site instead.
+            Tool::Calibrate => self.project.placed(),
+            _ => false,
+        };
+
+        if unusable {
             self.take_up(Tool::Select);
         } else {
             self.take_up(self.tool);
@@ -792,7 +901,10 @@ impl App {
 
         match tool {
             Tool::Pen => self.pen = Some(Pen::default()),
-            Tool::Calibrate => self.pick = Some(Pick::First),
+            // A scale is taken once, from the first drawing, and that is what
+            // places the site. Every sheet after it takes its scale from the
+            // match instead, so there is nothing here left to pick.
+            Tool::Calibrate if !self.project.placed() => self.pick = Some(Pick::First),
             tool if tool.edits_anchors() => self.editor = Some(Editor::default()),
             _ => {}
         }
@@ -894,6 +1006,157 @@ impl App {
                 });
             }
             None => {}
+        }
+    }
+
+    /// Where the sheet on screen sits in the site, if it has been placed.
+    /// A sheet with no placement has no way of saying where a click on it
+    /// falls, which is what keeps marks and matches off it.
+    fn placement(&self) -> Option<doc::Placement> {
+        self.project.placement(self.current)
+    }
+
+    /// Whether places in the site can be marked on the sheet on screen, which
+    /// they can as soon as it has been placed — by calibration if it was the
+    /// first, and by registration if it came after.
+    fn placing_references(&self) -> bool {
+        self.placement().is_some()
+    }
+
+    /// Marks a place in the site. The number is so that no point is nameless;
+    /// a said thing is what somebody should give it instead.
+    fn place_reference(&mut self, page: Point) {
+        let Some(at) = self.placement().map(|placement| placement.site(page)) else {
+            return;
+        };
+
+        self.commit();
+
+        self.project.references_placed += 1;
+        self.project.reference_points.push(doc::ReferencePoint {
+            at,
+            label: self.project.references_placed.to_string(),
+        });
+    }
+
+    /// Says where the reference point chosen in the picker falls on the sheet
+    /// being registered, and places the sheet once two of them are known.
+    fn identify(&mut self, page: Point) {
+        let Some(registering) = &mut self.registering else {
+            return;
+        };
+
+        let Some(point) = registering.choosing.take() else {
+            return;
+        };
+
+        registering.identified.push((point, page));
+
+        if registering.identified.len() < MATCHES {
+            return;
+        }
+
+        // Two pairs: where they are on this sheet, and where the site already
+        // knows them to be.
+        let sheet = registering.sheet;
+        let pairs: Vec<(Point, Point)> = registering
+            .identified
+            .iter()
+            .filter_map(|(point, at)| Some((*at, self.project.reference_points.get(*point)?.at)))
+            .collect();
+
+        let [(first_page, first_site), (second_page, second_site)] = pairs[..] else {
+            return;
+        };
+
+        let placed = doc::Placement::matching(
+            (first_page, second_page),
+            (first_site, second_site),
+        );
+
+        match placed {
+            Some(placement) => {
+                self.commit();
+                self.project.placements.insert(sheet, placement);
+                self.registering = None;
+
+                // The scale is reported because it was derived rather than
+                // given: it is the one thing about the match nobody stated.
+                self.report(format!(
+                    "Placed at {} · {:.4} mm/pt",
+                    ratio_label(placement.ratio()),
+                    placement.scale
+                ));
+            }
+            // Two clicks on the same spot fix nothing. The second is dropped
+            // and the point goes back in the picker to be identified again.
+            None => {
+                if let Some(registering) = &mut self.registering {
+                    registering.identified.pop();
+                }
+                self.complain(
+                    "Those two points landed on the same spot, which places nothing. \
+                     Identify the second one where it actually falls."
+                        .to_owned(),
+                );
+            }
+        }
+    }
+
+    /// Gives up on tying a sheet in, and takes the drawing back out of the
+    /// project. A drawing that is not placed can do nothing, so leaving it
+    /// behind would leave a drawing nobody can use and nobody can place.
+    fn abandon_registration(&mut self) {
+        let Some(registering) = self.registering.take() else {
+            return;
+        };
+
+        self.remove_drawing(registering.sheet.drawing);
+    }
+
+    /// Takes a drawing out of the project, with everything filed under it.
+    /// This is the only remedy for a sheet placed wrongly: a registration is
+    /// not adjusted afterwards, it is done again from the beginning.
+    fn remove_drawing(&mut self, drawing: usize) {
+        if drawing >= self.project.drawings.len() {
+            return;
+        }
+
+        self.commit();
+
+        self.project.drawings.remove(drawing);
+        self.documents.remove(drawing);
+
+        // Everything is filed under a sheet that names its drawing by place in
+        // the list, so every sheet after the one removed shifts down one.
+        let renumber = |sheet: &Sheet| match sheet.drawing {
+            at if at == drawing => None,
+            at if at > drawing => Some(Sheet::new(at - 1, sheet.page)),
+            _ => Some(*sheet),
+        };
+
+        self.project.calibrations = std::mem::take(&mut self.project.calibrations)
+            .into_iter()
+            .filter_map(|(sheet, held)| Some((renumber(&sheet)?, held)))
+            .collect();
+        self.project.placements = std::mem::take(&mut self.project.placements)
+            .into_iter()
+            .filter_map(|(sheet, held)| Some((renumber(&sheet)?, held)))
+            .collect();
+        self.project.measurements = std::mem::take(&mut self.project.measurements)
+            .into_iter()
+            .filter_map(|(sheet, held)| Some((renumber(&sheet)?, held)))
+            .collect();
+
+        let showing = Sheet::new(
+            self.current.drawing.min(self.project.drawings.len().saturating_sub(1)),
+            0,
+        );
+
+        if self.project.drawings.is_empty() {
+            self.close_project();
+        } else if let Err(message) = self.show_sheet(showing) {
+            self.complain(message);
         }
     }
 
@@ -1005,11 +1268,32 @@ impl App {
             // Every one of these needs a drawing to act on.
             let open = !self.project.drawings.is_empty();
 
+            let refusal = self.cannot_add_drawing();
+            let add = ui.add_enabled(
+                open && refusal.is_none(),
+                egui::Button::new("Add drawing…"),
+            );
+
+            if let Some(refusal) = &refusal {
+                add.on_disabled_hover_text(refusal);
+            } else if add.clicked() {
+                self.add_drawing_dialog();
+            }
+
+            // The only remedy for a sheet placed wrongly: a registration is
+            // not adjusted afterwards, it is done again from the beginning.
             if ui
-                .add_enabled(open, egui::Button::new("Add drawing…"))
+                .add_enabled(
+                    self.project.drawings.len() > 1,
+                    egui::Button::new("Remove this drawing"),
+                )
+                .on_hover_text(
+                    "Takes this drawing out of the project, with everything measured on it",
+                )
+                .on_disabled_hover_text("A project keeps its first drawing")
                 .clicked()
             {
-                self.add_drawing_dialog();
+                self.remove_drawing(self.current.drawing);
             }
 
             ui.separator();
@@ -1127,9 +1411,20 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                match self.project.calibrations.get(&self.current) {
-                    Some(calibration) => ui.label(scale_label(calibration)),
-                    None => ui.label("Not calibrated"),
+                // The calibrated sheet reads out the scale it was given; a
+                // matched one reads out the scale the match derived, which is
+                // the one thing about it nobody stated.
+                match (
+                    self.project.calibrations.get(&self.current),
+                    self.placement(),
+                ) {
+                    (Some(calibration), _) => ui.label(scale_label(calibration)),
+                    (None, Some(placement)) => ui.label(format!(
+                        "Matched · {} · {:.4} mm/pt",
+                        ratio_label(placement.ratio()),
+                        placement.scale
+                    )),
+                    (None, None) => ui.label("Not placed"),
                 };
 
                 if let Some(notice) = &self.notice {
@@ -1146,14 +1441,21 @@ impl App {
 
     /// What the tool in hand is waiting for.
     fn hint(&self) -> &'static str {
+        if self.registering.is_some() {
+            return "Choose a reference point, then click where it falls on this drawing";
+        }
+
         match self.tool {
+            Tool::Calibrate if self.project.placed() => {
+                "The site has its scale; a drawing after the first is matched into it, not calibrated"
+            }
             Tool::Calibrate => match self.pick {
                 Some(Pick::First) => "Click the first point of a known distance",
                 Some(Pick::Second { .. }) => "Click the second point",
                 None => "Enter the distance between the two points",
             },
-            Tool::Pen if !self.project.calibrations.contains_key(&self.current) => {
-                "Calibrate this page before measuring areas on it"
+            Tool::Pen if self.placement().is_none() => {
+                "This drawing is not placed, so nothing can be measured on it"
             }
             Tool::Pen if self.pen_target.is_some() => "Tracing a hole; right-click to close",
             Tool::Pen => "Click to place corners, drag to curve, right-click to close",
@@ -1162,6 +1464,13 @@ impl App {
             Tool::AnchorPoint => "Click an anchor to flip it between a corner and a curve",
             Tool::AddAnchor => "Click an edge to add an anchor to it",
             Tool::DeleteAnchor => "Click an anchor to take it away",
+            Tool::ReferencePoint if self.project.site_sheet().is_none() => {
+                "Calibrate a drawing before marking places on the site"
+            }
+            Tool::ReferencePoint if !self.placing_references() => {
+                "Reference points go on the drawing that placed the site"
+            }
+            Tool::ReferencePoint => "Click an identifiable feature to mark it",
         }
     }
 
@@ -1170,7 +1479,7 @@ impl App {
     fn tool_strip(&mut self, ui: &mut egui::Ui) {
         // The tools that work, in the order and with the keys they carry in
         // the drawing applications this sits beside.
-        const TOOLS: [(Tool, &str, &str); 7] = [
+        const TOOLS: [(Tool, &str, &str); 8] = [
             (Tool::Select, "v", "Selection (v)"),
             (Tool::DirectSelect, "a", "Direct Selection (a)"),
             (Tool::Pen, "p", "Pen (p)"),
@@ -1178,6 +1487,7 @@ impl App {
             (Tool::AddAnchor, "+", "Add Anchor Point (+)"),
             (Tool::DeleteAnchor, "−", "Delete Anchor Point (−)"),
             (Tool::Calibrate, "u", "Calibrate the page scale (u)"),
+            (Tool::ReferencePoint, "x", "Reference Point (x)"),
         ];
 
         // Labels only, holding letters for a later project. Nothing lies
@@ -1338,7 +1648,12 @@ impl App {
             self.save();
         }
 
-        if let Some(tool) = input.tool {
+        // A tool cannot be taken up mid-match: the sheet is not placed, so
+        // there is nothing for one to act on until the match is finished or
+        // given up.
+        if let Some(tool) = input.tool
+            && self.registering.is_none()
+        {
             self.take_up(tool);
         }
         if input.snap {
@@ -1394,7 +1709,7 @@ impl App {
 
         // Picking a span. Points are taken in page space, so panning or
         // zooming between the two clicks does not move the first one.
-        if self.pick.is_some() {
+        if self.registering.is_none() && self.pick.is_some() {
             if response.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
@@ -1406,10 +1721,40 @@ impl App {
             }
         }
 
+        // Identifying a place on the sheet being tied in. While that is going
+        // on it is the only thing a click does: the sheet has no placement, so
+        // there is nothing else that could be done on it.
+        if self.registering.is_some() {
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+
+            if response.clicked()
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                self.identify(self.page_point(pos));
+            }
+        }
+
+        // Marking a place in the site. One click, one point: there is nothing
+        // to shape and nothing to close.
+        if self.registering.is_none() && self.tool == Tool::ReferencePoint && self.placing_references()
+        {
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+
+            if response.clicked()
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                self.place_reference(self.page_point(pos));
+            }
+        }
+
         // Tracing an outline. A left click places a corner and a left drag
         // pulls handles out of it; a right click closes the outline back to
         // the first anchor, however far away it is.
-        if self.pen.is_some() {
+        if self.registering.is_none() && self.pen.is_some() {
             if response.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
@@ -1457,11 +1802,11 @@ impl App {
             }
         }
 
-        if self.editor.is_some() {
+        if self.registering.is_none() && self.editor.is_some() {
             self.edit_anchors(ui, &response, &input);
         }
 
-        if self.tool == Tool::Select {
+        if self.registering.is_none() && self.tool == Tool::Select {
             self.select_measurement(ui, &response, &input);
         }
 
@@ -1567,6 +1912,187 @@ impl App {
             });
     }
 
+    /// The picker that ties an incoming sheet into the site: which place is
+    /// being identified, and how many are still wanted.
+    ///
+    /// Nothing is put on the drawing by choosing. The person says which place
+    /// they are about to point at, and the click is what says where it is.
+    fn registration_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(registering) = &self.registering else {
+            return;
+        };
+
+        let drawing = self
+            .project
+            .drawings
+            .get(registering.sheet.drawing)
+            .map_or_else(String::new, |drawing| drawing.name());
+
+        ui.add_space(4.0);
+        ui.heading("Place this drawing");
+        ui.add_space(4.0);
+
+        ui.label(format!(
+            "{drawing} is not placed yet. Identify {MATCHES} reference points on it \
+             and it takes its scale, its rotation and its position from them."
+        ));
+        ui.add_space(8.0);
+
+        let done = registering.identified.len();
+        let mut choosing = registering.choosing;
+        let mut cancel = false;
+
+        // What has been identified already, so it is plain what is left.
+        for (point, _) in &registering.identified {
+            let label = self
+                .project
+                .reference_points
+                .get(*point)
+                .map_or("", |point| point.label.as_str());
+
+            ui.horizontal(|ui| {
+                ui.label("✓");
+                ui.label(label);
+            });
+        }
+
+        ui.add_space(6.0);
+
+        let chosen = choosing
+            .and_then(|point| self.project.reference_points.get(point))
+            .map_or_else(
+                || "Choose a reference point…".to_owned(),
+                |point| point.label.clone(),
+            );
+
+        egui::ComboBox::from_id_salt("registration picker")
+            .selected_text(chosen)
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                // Only the ones still wanting identifying: a place already
+                // matched cannot be matched twice.
+                for (index, point) in self.project.reference_points.iter().enumerate() {
+                    if registering.taken(index) {
+                        continue;
+                    }
+
+                    ui.selectable_value(&mut choosing, Some(index), &point.label);
+                }
+            });
+
+        ui.add_space(6.0);
+
+        match choosing.and_then(|point| self.project.reference_points.get(point)) {
+            Some(point) => {
+                ui.label(format!("Click where {} falls on this drawing.", point.label));
+            }
+            None => {
+                ui.weak(format!("{} more to identify.", MATCHES - done));
+            }
+        }
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        if ui
+            .button("Cancel and take the drawing back out")
+            .on_hover_text(
+                "A registration is not adjusted afterwards. A drawing placed \
+                 wrongly is removed and brought in again.",
+            )
+            .clicked()
+        {
+            cancel = true;
+        }
+
+        if let Some(registering) = &mut self.registering {
+            registering.choosing = choosing;
+        }
+
+        if cancel {
+            self.abandon_registration();
+        }
+    }
+
+    /// The site's reference points, with the names people give them.
+    ///
+    /// They are listed here whatever sheet is on screen, because they belong
+    /// to the site rather than to any one drawing: the list is the same list
+    /// from wherever it is read.
+    fn reference_points_list(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.heading("Reference points");
+        ui.add_space(4.0);
+
+        match self.project.site_sheet() {
+            None => {
+                ui.label("Calibrate a drawing to mark places on the site.");
+            }
+            Some(sheet) if sheet != self.current => {
+                let placed = self
+                    .project
+                    .drawings
+                    .get(sheet.drawing)
+                    .map_or_else(String::new, |drawing| drawing.name());
+
+                ui.label(format!("Marked with x on {placed}, which placed the site."));
+            }
+            Some(_) => {
+                ui.label("Mark an identifiable feature with x. Two, as far apart as possible.");
+            }
+        }
+
+        if self.project.reference_points.is_empty() {
+            ui.add_space(4.0);
+            ui.weak("None yet.");
+        }
+
+        // Widgets change the value in place, so the state to go back to has to
+        // be kept before any of them run.
+        let snapshot = self.project.clone();
+        let mut changed = false;
+        let mut labelling = self.labelling;
+        let mut remove = None;
+
+        for (index, point) in self.project.reference_points.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                let label = ui
+                    .add(egui::TextEdit::singleline(&mut point.label).desired_width(160.0))
+                    .on_hover_text("What this place is called");
+
+                // One undo step per rename, not one per keystroke.
+                if label.changed() && labelling != Some(index) {
+                    changed = true;
+                    labelling = Some(index);
+                }
+                if label.lost_focus() && labelling == Some(index) {
+                    labelling = None;
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Remove").clicked() {
+                        remove = Some(index);
+                    }
+                });
+            });
+        }
+
+        self.labelling = labelling;
+
+        if let Some(index) = remove {
+            self.project.reference_points.remove(index);
+            changed = true;
+        }
+
+        if changed {
+            self.keep(snapshot);
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+    }
+
     fn measurements_panel(&mut self, ui: &mut egui::Ui) {
         // Capped as well as defaulted: a panel takes its width from the last
         // frame's content, so anything in it that asks for more than it has
@@ -1575,13 +2101,23 @@ impl App {
             .default_size(PANEL_WIDTH)
             .max_size((ui.available_width() * COLUMN_SHARE).max(PANEL_WIDTH))
             .show(ui, |ui| {
+                // While a sheet is being tied in, the panel is about that and
+                // nothing else: there is nothing to measure on a sheet that is
+                // not yet placed.
+                if self.registering.is_some() {
+                    self.registration_panel(ui);
+                    return;
+                }
+
+                self.reference_points_list(ui);
+
                 ui.add_space(4.0);
                 ui.heading("Measurements");
                 ui.add_space(4.0);
 
-                let Some(calibration) = self.project.calibrations.get(&self.current).copied()
+                let Some(measure) = self.project.measure(self.current)
                 else {
-                    ui.label("Calibrate this page to measure areas on it.");
+                    ui.label("This drawing is not placed, so nothing can be measured on it.");
                     return;
                 };
 
@@ -1647,8 +2183,8 @@ impl App {
 
                     ui.horizontal(|ui| {
                         ui.label(area_label(
-                            calibration.square_millimetres(geom::measurement_area(measurement)),
-                            calibration.unit,
+                            measure.square_millimetres(geom::measurement_area(measurement)),
+                            measure.unit,
                         ));
 
                         // The perimeter is the outline's own: a hole is a
@@ -1656,8 +2192,8 @@ impl App {
                         ui.weak(format!(
                             "· {}",
                             length_label(
-                                calibration.millimetres(geom::perimeter(&measurement.outer)),
-                                calibration.unit,
+                                measure.millimetres(geom::perimeter(&measurement.outer)),
+                                measure.unit,
                             )
                         ))
                         .on_hover_text("Perimeter");
@@ -1681,18 +2217,18 @@ impl App {
                             ui.weak(format!(
                                 "− {}",
                                 area_label(
-                                    calibration.square_millimetres(geom::taken_by(
+                                    measure.square_millimetres(geom::taken_by(
                                         &measurement.outer,
                                         subpath
                                     )),
-                                    calibration.unit,
+                                    measure.unit,
                                 )
                             ));
                             ui.weak(format!(
                                 "· {}",
                                 length_label(
-                                    calibration.millimetres(geom::perimeter(subpath)),
-                                    calibration.unit,
+                                    measure.millimetres(geom::perimeter(subpath)),
+                                    measure.unit,
                                 )
                             ))
                             .on_hover_text("Perimeter");
@@ -2290,6 +2826,29 @@ impl App {
             self.draw_measurement(scene, measurement, selected);
         }
 
+        // The site's reference points, on whatever sheet is showing that
+        // ground: they belong to the site, so a placed sheet shows every one
+        // that falls on it, identified there or not.
+        if let Some(placement) = self.placement() {
+            for point in &self.project.reference_points {
+                self.draw_target(scene, placement.page(point.at), &point.label);
+            }
+        }
+
+        // While a sheet is being registered it has no placement yet, so the
+        // points identified on it so far are drawn from the match itself.
+        if let Some(registering) = &self.registering {
+            for (point, at) in &registering.identified {
+                let label = self
+                    .project
+                    .reference_points
+                    .get(*point)
+                    .map_or("", |point| point.label.as_str());
+
+                self.draw_target(scene, *at, label);
+            }
+        }
+
         self.draw_pen(scene, cursor);
         self.draw_anchors(scene);
 
@@ -2321,6 +2880,9 @@ impl App {
 
         match self.tool {
             Tool::Pen | Tool::Calibrate => true,
+            // A reference point is only worth anything if it is on the feature
+            // it claims to be on, so this is exactly when to magnify.
+            Tool::ReferencePoint => self.placing_references(),
             Tool::AnchorPoint | Tool::AddAnchor | Tool::DeleteAnchor => true,
             Tool::DirectSelect => self
                 .editor
@@ -2555,13 +3117,13 @@ impl App {
             ));
         }
 
-        let Some(calibration) = self.project.calibrations.get(&self.current) else {
+        let Some(measure) = self.project.measure(self.current) else {
             return;
         };
 
         let area = area_label(
-            calibration.square_millimetres(geom::measurement_area(measurement)),
-            calibration.unit,
+            measure.square_millimetres(geom::measurement_area(measurement)),
+            measure.unit,
         );
 
         self.draw_label(
@@ -2662,6 +3224,57 @@ impl App {
         scene.painter.galley(rect.min, galley, egui::Color32::WHITE);
     }
 
+    /// The mark a reference point carries: two concentric circles with the
+    /// quadrants alternating light and dark, and a crosshair through them.
+    ///
+    /// Drawn at a fixed size on screen rather than scaled with the drawing, so
+    /// that the centre stays a point and the whole thing stays findable at any
+    /// zoom.
+    fn draw_target(&self, scene: &Scene, at: Point, label: &str) {
+        use std::f32::consts::FRAC_PI_2;
+
+        let centre = scene.at(at);
+
+        // Each quadrant as a sector of the outer circle, alternating, which is
+        // what makes the centre readable against a drawing of any colour.
+        for quadrant in 0..4 {
+            let colour = if quadrant % 2 == 0 {
+                TARGET_DARK
+            } else {
+                TARGET_LIGHT
+            };
+
+            let mut sector = vec![centre];
+            for step in 0..=STEPS {
+                let angle = (quadrant as f32 + step as f32 / STEPS as f32) * FRAC_PI_2;
+                sector.push(centre + egui::vec2(angle.cos(), angle.sin()) * TARGET);
+            }
+
+            scene.painter.add(egui::Shape::convex_polygon(
+                sector,
+                colour,
+                egui::Stroke::NONE,
+            ));
+        }
+
+        let ring = egui::Stroke::new(1.0, TARGET_DARK);
+        scene.painter.circle_stroke(centre, TARGET, ring);
+        scene.painter.circle_stroke(centre, TARGET / 2.0, ring);
+
+        // The crosshair runs past the circles, so the mark reads as a point
+        // rather than as a blob of some width.
+        for arm in [egui::vec2(TARGET * 1.7, 0.0), egui::vec2(0.0, TARGET * 1.7)] {
+            scene
+                .painter
+                .line_segment([centre - arm, centre + arm], ring);
+        }
+
+        // Below the target rather than over it: the label says which point it
+        // is, and covering the mark would defeat the point of drawing it.
+        let below = at + Vec2::new(0.0, f64::from(TARGET) * 2.4 / scene.view.zoom);
+        self.draw_label(scene, below, label);
+    }
+
     fn draw_span(&self, scene: &Scene, from: Point, to: Point) {
         let a = scene.view.page_to_screen(from);
         let b = scene.view.page_to_screen(to);
@@ -2735,18 +3348,21 @@ fn length_label(millimetres: f64, unit: Unit) -> String {
     }
 }
 
-/// e.g. `Scale 1:100 · 35.2778 mm/pt`.
-fn scale_label(calibration: &Calibration) -> String {
-    let ratio = calibration.ratio();
-    let ratio_text = if ratio >= 1.0 {
+/// A drawing ratio as it is written: `1:100`, or the other way round for a
+/// detail drawn larger than life.
+fn ratio_label(ratio: f64) -> String {
+    if ratio >= 1.0 {
         format!("1:{ratio:.0}")
     } else {
-        // A detail drawn larger than life reads the other way round.
         format!("{:.0}:1", 1.0 / ratio)
-    };
+    }
+}
 
+/// e.g. `Scale 1:100 · 35.2778 mm/pt`.
+fn scale_label(calibration: &Calibration) -> String {
     format!(
-        "Scale {ratio_text} · {:.4} {}/pt",
+        "Scale {} · {:.4} {}/pt",
+        ratio_label(calibration.ratio()),
         calibration.units_per_point(),
         calibration.unit.label()
     )
