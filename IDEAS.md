@@ -1,8 +1,8 @@
 # Ideas
 
 Somewhere for what is worth doing but is not being done. Nothing here is a
-commitment, and nothing here is a scope: a slice is drawn from this list
-deliberately, written into CLAUDE.md §6 first, and only then built.
+commitment, and nothing here is a scope: something is taken from this list
+deliberately and agreed before it is built.
 
 One line each, with why it might matter. If an idea turns out to be a decision
 about how something already built should work, it belongs in CLAUDE.md instead,
@@ -10,12 +10,6 @@ not here.
 
 ## Raised and not scheduled
 
-- **Deriving a registered sheet's scale rather than inheriting it.** Two
-  reference points identified on an incoming drawing would give its scale as
-  well as its position. The decision stands at inherit-and-report, which is
-  right for a set plotted at one scale and wrong for a sheet genuinely plotted
-  at another — a detail at 1:200 in a 1:500 set would register visibly off.
-  Worth revisiting the first time a set arrives at mixed scales.
 - **Picking a drawing from a list rather than cycling.** The strip along the
   bottom steps one at a time, which is fine for a handful and tiresome for
   forty.

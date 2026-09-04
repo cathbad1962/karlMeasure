@@ -51,10 +51,11 @@ list below is the whole of phase two; the order it is built in is not settled.
   is what a person should give it.
 - **Registering a sheet** against an already-placed one, by identifying two of
   its reference points on the incoming drawing. Two is what the registration
-  needs; a drawing may carry as many as are useful. The scale is inherited, and
-  the mismatch left over is reported rather than absorbed. **Only the first
-  drawing is ever calibrated**: every other sheet derives its placement from a
-  sheet already placed, or it is not placed at all.
+  needs; a drawing may carry as many as are useful. The scale is derived from
+  the two points rather than inherited, and nothing is left over to check: see
+  DECISIONS.md. **Only the first drawing is ever calibrated**: every other
+  sheet derives its placement from a sheet already placed, or it is not placed
+  at all.
 - **Groups**: an area type, carrying an ordered build-up of layers with
   thicknesses, tagged onto areas. Totals by group; areas named from the type
   and their ordinal.
@@ -135,9 +136,9 @@ to build behind.
   site space: uniform scale, rotation, translation. Nothing else. A sheet that
   needs shearing to fit is a sheet that is wrong, and it should be said so
   rather than accommodated.
-- **Calibration is real-world units per PDF point**, per sheet, and it is what
-  establishes the first placement. A sheet registered against a placed one
-  inherits that scale.
+- **Calibration is real-world units per PDF point**, and it is what
+  establishes the first placement, on the first drawing only. A sheet
+  registered against a placed one takes its scale from the two matched points.
 - **`kurbo` types are the internal vocabulary** (`Point`, `Vec2`, `BezPath`).
   Convert to `egui` types only at the paint call.
 - **Render the visible viewport only**, never the full page — a full-size sheet
