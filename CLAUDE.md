@@ -32,7 +32,7 @@ accurate.
 
 Phase one is delivered and tagged `v0.1.0`: areas measured on a single
 calibrated drawing. Phase two builds a site take-off on that foundation. The
-list below is the whole of phase two; §6 says what order it is built in.
+list below is the whole of phase two; the order it is built in is not settled.
 
 **In scope**
 
@@ -89,13 +89,13 @@ Shortcuts are reserved the same way. `Shift+Alt+C` is held for a format
 painter, and `Shift+Alt+L` for Length, and neither may be bound to anything
 else. No shortcut may pair Ctrl with `C`, `X` or `V`: the window layer turns
 those into clipboard events and returns before a key event exists, so they
-cannot reach this application at all. `x` is the reference point tool, from
-slice 3 on — x marks the spot.
+cannot reach this application at all. `x` is reserved for the reference point
+tool — x marks the spot.
 
-**The second column is no longer empty.** It held the space for a later
-project's tool groups; from slice 4 it carries a **Takeoff** tab, and the first
-thing in it is *Import Digital Plan using Matchlines*. The reservation stood
-while there was nothing to put there. There is now.
+**The second column is still empty.** It holds the space for a later project's
+tool groups. The intention is that it carries a **Takeoff** tab whose first
+entry is *Import Digital Plan using Matchlines*, but none of that is built, and
+how a second sheet joins the project is not settled.
 
 **Existing and Proposed** are reserved the same way, in the strip along the
 bottom. Everything measured here is proposed work, so Proposed is shown as the
@@ -298,89 +298,3 @@ and once as proposed, and the two are never summed together.
   and ask rather than implementing both.
 - **Commit at the end of each working increment**, so a hard reset is cheap.
 - Commit messages describe the change only. No project, client, or product names.
-
----
-
-## 6. Slices, in order
-
-Each line is the definition of done for that session.
-
-### Phase two
-
-1. A project holds more than one drawing: add a second, see both listed, switch
-   between them, save a project file that names them and reopen it. A phase-one
-   sidecar comes in as a one-drawing project.
-2. Geometry moves into site space, in millimetres. Calibrating the first
-   drawing places it; outlines are stored in real-world coordinates and a
-   drawing becomes a window onto them. Nothing on screen changes and no number
-   moves — that is the check — but the file holds one measure rather than one
-   per page.
-3. Reference points: the `x` tool, the target symbol, a label with a number as
-   its default, saved and reloaded, placeable on any placed drawing.
-4. *Import Digital Plan using Matchlines*, from the Takeoff tab in the second
-   column: refused until the placed drawing carries two reference points, then
-   each is identified in turn on the incoming drawing, which lands placed with
-   its scale reported. Calibration is offered only while nothing is placed:
-   from here a second drawing is registered, never calibrated.
-5. Areas and reference points show through: work on a neighbouring sheet
-   appears where it falls on this one, so a matchline reads as continuous and
-   a registration can be seen to be right.
-6. Groups exist: name a type, assign areas to it, see the list two-level with a
-   total per group. Areas take their name from the type and their ordinal.
-7. A group carries an ordered build-up: layers with thicknesses, and the level
-   reduction they sum to.
-8. Quantities: the group's total against each layer, one line apiece.
-9. Deduction by containment: gross, deducted and net, derived rather than
-   stored.
-10. Export the quantities alongside the areas.
-11. The checks: a site boundary against the sum of net areas, and overlap
-    within a group. Both report; neither resolves.
-
-### Phase one, delivered and tagged `v0.1.0`
-
-1. A PDF opens and a page is visible in a window.
-2. The page pans and zooms smoothly; page navigation works. The scroll wheel
-   zooms about the cursor; holding the wheel button down and dragging pans.
-3. Pick two points, enter a known distance and unit, see a scale readout that
-   survives zooming.
-4. Click three times to place corner anchors, close the path, see the enclosed
-   area in real units.
-5. Click-and-drag while placing produces smooth anchors with mirrored handles;
-   a modifier breaks the mirror.
-6. Select and drag an existing anchor or handle; insert an anchor on a segment;
-   delete one; toggle corner/smooth. Undo and redo work.
-7. Measurements are named and listed; holes subtract; colours and visibility
-   toggle.
-8. Snapping to existing anchors; modifier-constrained orthogonal placement;
-   magnifier under the cursor.
-9. Save and reload a project sidecar; export CSV. Perimeter is reported
-   alongside area, in the list and in the export — §2 promises it and no
-   earlier slice delivered it.
-10. Packaging and buffer.
-
-Do not start a slice before the previous one has been run and accepted.
-
-**Current slice: phase two, 2 — agreed, not started.** Phase two, slice 1 is
-accepted: a project holds several drawings, saved as a project file that names
-them relative to itself, with a phase-one sidecar opening as a one-drawing
-project. The drawings are cycled through in the strip along the bottom, which
-also carries the Existing and Proposed labels; the panel opposite is for
-measurements alone.
-
-Slice 2 is agreed and its check written. When it is done:
-
-1. On a single drawing everything behaves as it does today — calibrate, trace,
-   edit, holes, undo, snapping, the magnifier — and **the areas and perimeters
-   read the same numbers as before**. That is the check; the rest is bookkeeping
-   underneath it.
-2. The project file holds outlines in millimetres of site space, and each
-   calibrated sheet carries its placement: scale, rotation, translation.
-3. An existing project file opens and converts, its page-space work placed
-   through each sheet's own calibration, and the numbers come out where they
-   went in.
-4. A sheet with no scale still cannot be traced on, now for a structural
-   reason: there is no placement to put its geometry into site space through.
-
-Calibrating a second drawing independently is still possible and still wrong.
-It goes at slice 4, when a second drawing is registered rather than calibrated.
-Update this line when a slice is accepted.
