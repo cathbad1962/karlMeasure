@@ -37,7 +37,7 @@ Work proceeds on instructions given in the session doing the work.
 
 ## 2026-09-05 — Bringing in a drawing by matching reference points
 
-Settled in conversation. None of it is built.
+Settled in conversation. What was built from it is the entry below.
 
 ### What a reference point is
 
@@ -86,9 +86,10 @@ and adjoining sheets overlap by however much ground they have in common.
 One page per file. A PDF with more than one page is **refused outright**, with
 a message asking for single-page files. Pages are registered one at a time.
 
-### What the application does today that this contradicts
+### What the application did at the time
 
-Recorded so it is not mistaken for agreement:
+Recorded so it was not mistaken for agreement. The entry below says which of
+these changed:
 
 - Any drawing can be calibrated independently, at any time, including the
   second and every one after it.
@@ -96,3 +97,72 @@ Recorded so it is not mistaken for agreement:
   files are accepted and paged through.
 - There is no reference point tool, no registration, and no site space:
   geometry is stored in page points, per sheet.
+
+---
+
+## 2026-09-05 — Reference points and matching, built
+
+Commit `0221838`. The entry above is what was asked for; this is what the
+application now does, and what it still does not.
+
+### Built as decided
+
+- **The `x` tool** marks a place on the site, drawn as a target: two concentric
+  circles, the quadrants alternating light and dark, a crosshair through them,
+  at a fixed size on screen so it stays findable at any zoom. The magnifier
+  comes up while placing one.
+- **A reference point belongs to the site.** It is held once for the whole
+  project, in site millimetres, under no sheet at all. Every placed sheet draws
+  the ones falling on the ground it covers, whether or not anyone identified
+  them there.
+- **Labels** default to a number so that none is nameless, and are typed over
+  with what the place is actually called. The number comes from a counter that
+  only ever climbs, so removing one never lets its number come round again.
+- **A sheet is placed by a similarity transform** into the site — scale,
+  rotation, translation, and nothing else. Calibrating the first drawing is
+  what places it, and is the one placement that derives from nothing else: it
+  follows from the calibration rather than being stored beside it, so the two
+  cannot fall out of step.
+- **Matching a drawing in.** Two places are chosen in turn from a picker and
+  clicked where they fall on the incoming sheet. Nothing is put on the drawing
+  by choosing: the choice says which place is about to be pointed at, the click
+  says where it is. The two pairs fix the transform exactly.
+- **Scale and rotation come out of the match**, never inherited. A sheet at
+  another scale, laid out at another rotation, lands where it belongs. The
+  derived scale is reported, because it is the one thing about the match that
+  nobody stated.
+- **Bringing in a drawing is refused** until two places are marked, since those
+  are what it would be matched against. The menu item is disabled and says so.
+- **Calibration is offered only while nothing is placed.** This is what stops a
+  second drawing being given a scale of its own. It also means the first
+  drawing can no longer be recalibrated.
+- **No re-registration.** A drawing placed wrongly is removed and brought in
+  again, so removing a drawing is possible, and giving up part-way through a
+  match does exactly that.
+
+### Decided while building
+
+Not covered by the conversation, and open to being changed:
+
+- **The reference points list sits in the right-hand panel, above the
+  measurements.** That panel was previously for measurements alone. The points
+  had to be nameable somewhere, and the second column is reserved.
+- **The site is placed by the first calibrated sheet in sheet order.** With
+  calibration now offered only once, there is only ever one to choose from.
+- **Two clicks on the same spot are refused** rather than yielding a placement
+  with no scale. The point goes back in the picker to be identified again.
+- **A measurement reads off however its sheet came to be placed.** Area and
+  perimeter come from the sheet's scale and the unit the site reads in, so a
+  matched sheet is traced on like any other. Without this a matched sheet would
+  be placed and still unmeasurable, and the match would deliver nothing.
+
+### Not built
+
+- **Multi-page files are still accepted.** A PDF of several pages comes in as
+  one drawing and only its first page is matched; the rest stay unplaced and
+  unusable. The decision was to refuse such files outright and take pages one
+  at a time.
+- **Geometry is still stored in page points, per sheet**, not in site space.
+  Areas and perimeters are right, because the sheet's own scale is applied to
+  them, but an outline itself is not held as a place on the site. Only
+  reference points are.
